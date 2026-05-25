@@ -108,9 +108,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -689,7 +687,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "socsim-core"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#fbb144a6305723723241c99ea5adb85093c95bf7"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#0a819c8c77bad6e91e76ef4c3aaafc10610cf967"
 dependencies = [
  "serde",
  "serde_json",
@@ -700,7 +698,7 @@ dependencies = [
 [[package]]
 name = "socsim-engine"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#fbb144a6305723723241c99ea5adb85093c95bf7"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#0a819c8c77bad6e91e76ef4c3aaafc10610cf967"
 dependencies = [
  "rand",
  "serde",
@@ -711,7 +709,7 @@ dependencies = [
 [[package]]
 name = "socsim-llm"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#fbb144a6305723723241c99ea5adb85093c95bf7"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#0a819c8c77bad6e91e76ef4c3aaafc10610cf967"
 dependencies = [
  "serde",
  "serde_json",
@@ -720,9 +718,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "socsim-results"
+version = "0.1.0"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#0a819c8c77bad6e91e76ef4c3aaafc10610cf967"
+dependencies = [
+ "chrono",
+ "csv",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "socsim-rng"
 version = "0.1.0"
-source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#fbb144a6305723723241c99ea5adb85093c95bf7"
+source = "git+https://github.com/akitenkrad/rs-social-simulation-tools?branch=main#0a819c8c77bad6e91e76ef4c3aaafc10610cf967"
 dependencies = [
  "rand",
  "rand_chacha",
@@ -733,7 +742,6 @@ dependencies = [
 name = "srap-simulation"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "clap",
  "csv",
  "rand",
@@ -742,6 +750,7 @@ dependencies = [
  "socsim-core",
  "socsim-engine",
  "socsim-llm",
+ "socsim-results",
 ]
 
 [[package]]

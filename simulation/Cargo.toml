@@ -17,7 +17,6 @@ csv         = "1.3"
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
 clap        = { version = "4.5", features = ["derive"] }
-chrono      = "0.4"
 
 # social-simulation framework (socsim) — ABM のエンジン基盤．SRAP-Agent は公共希少資源
 # (公共住宅) を中央プールへ配分する «中央集権型» モデルで，応募者エージェントが中央の
@@ -31,3 +30,6 @@ chrono      = "0.4"
 socsim-core   = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-core" }
 socsim-engine = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-engine" }
 socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-llm", features = ["live"] }
+# 出力ヘルパ (timestamp / run-dir / latest symlink / CSV・JSON writer)．
+# ライブラリモードのボイラープレートを集約した共有クレット．
+socsim-results = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-results" }

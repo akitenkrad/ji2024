@@ -7,13 +7,11 @@
 //! `poa`       : 遺伝的アルゴリズムによるポリシー最適化 (Phase-3 最小スタブ)．
 //! `reproduce` : 論文 Table 2/3・Fig.4 一括再現 (Phase 3; 現状はスタブ案内)．
 
-use std::fs::{self, File};
-use std::io::BufWriter;
+use std::fs;
 use std::path::Path;
 
-use chrono::Local;
 use clap::{Parser, Subcommand};
-use csv::Writer;
+use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
 
 use socsim_llm::mock::ScriptedClient;
 use socsim_llm::PromptCache;
@@ -294,18 +292,6 @@ struct PoaConfigJson {
 // 補助
 // ---------------------------------------------------------------------------
 
-/// latest シンボリックリンクを (再) 作成する．
-fn refresh_latest(output_dir: &str, target: &str) {
-    let symlink_path = Path::new(output_dir).join("latest");
-    if symlink_path.is_symlink() {
-        let _ = fs::remove_file(&symlink_path);
-    }
-    #[cfg(unix)]
-    {
-        let _ = std::os::unix::fs::symlink(target, &symlink_path);
-    }
-}
-
 /// カンマ区切り文字列を trim 済みの非空リストへ．
 fn split_csv(s: &str) -> Vec<String> {
     s.split(',')
@@ -382,7 +368,7 @@ fn cmd_run(args: RunArgs) {
         args.c,
     );
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}", args.output_dir, timestamp);
 
     if let Some(parent) = Path::new(&args.cache_path).parent() {
@@ -449,10 +435,9 @@ fn cmd_run(args: RunArgs) {
 
     if let (Some(result), Some(cfg)) = (&last_result, &last_cfg) {
         save_llm_meta(result, cfg, &output_dir);
+        // config.json (pretty-print JSON; socsim_results::write_json に委譲)．
         let path = format!("{output_dir}/config.json");
-        let file = File::create(&path).expect("config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &cfg.to_run_config_json())
-            .expect("config.json の書き込みに失敗");
+        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
 
         let m = &result.final_metrics;
         println!(
@@ -472,7 +457,8 @@ fn cmd_run(args: RunArgs) {
         );
     }
 
-    refresh_latest(&args.output_dir, &timestamp);
+    // latest シンボリックリンクを再作成する (best-effort; 従来同様エラーは無視)．
+    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
     println!("メトリクス → {output_dir}/metrics.csv");
     println!("LLM メタ   → {output_dir}/llm_meta.json");
     println!("設定       → {output_dir}/config.json");
@@ -496,7 +482,7 @@ fn cmd_sweep(args: SweepArgs) {
         .map(|s| parse_sort_strategy(s).unwrap_or_else(|e| panic!("{e}")))
         .collect();
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
     fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
     if let Some(parent) = Path::new(&args.cache_path).parent() {
@@ -591,15 +577,10 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv
+    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
     {
         let path = format!("{sweep_dir}/sweep_summary.csv");
-        let file = File::create(&path).expect("sweep_summary.csv の作成に失敗");
-        let mut wtr = Writer::from_writer(BufWriter::new(file));
-        for row in &summary_rows {
-            wtr.serialize(row).expect("サマリ行の書き込みに失敗");
-        }
-        wtr.flush().expect("フラッシュに失敗");
+        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
     }
     // metrics.csv (long-format, 全 run)．
     save_metrics(&all_metrics, &sweep_dir);
@@ -622,12 +603,10 @@ fn cmd_sweep(args: SweepArgs) {
             llm_seed: args.llm_seed,
         };
         let path = format!("{sweep_dir}/sweep_config.json");
-        let file = File::create(&path).expect("sweep_config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &config_json)
-            .expect("sweep_config.json の書き込みに失敗");
+        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
     }
 
-    refresh_latest(&args.output_dir, &format!("{timestamp}_sweep"));
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("{timestamp}_sweep"));
 
     println!("===========================================================");
     println!("資源サブセット別の平均 SW (論文: r_size 最高 / r_random 最低):");
@@ -654,7 +633,7 @@ fn cmd_sweep(args: SweepArgs) {
 fn cmd_poa(args: PoaArgs) {
     let objective = parse_objective(&args.objective).unwrap_or_else(|e| panic!("{e}"));
 
-    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let timestamp = timestamp();
     let output_dir = format!("{}/{}_poa", args.output_dir, timestamp);
     ensure_output_dir(&output_dir);
 
@@ -692,15 +671,10 @@ fn cmd_poa(args: PoaArgs) {
 
     let result = run_poa(&poa_cfg);
 
-    // poa_history.csv
+    // poa_history.csv (各行を serialize; socsim_results::write_csv に委譲)．
     {
         let path = format!("{output_dir}/poa_history.csv");
-        let file = File::create(&path).expect("poa_history.csv の作成に失敗");
-        let mut wtr = Writer::from_writer(BufWriter::new(file));
-        for row in &result.history {
-            wtr.serialize(row).expect("履歴行の書き込みに失敗");
-        }
-        wtr.flush().expect("フラッシュに失敗");
+        write_csv(&result.history, &path).expect("poa_history.csv の書き込みに失敗");
     }
     // poa_config.json
     {
@@ -720,12 +694,10 @@ fn cmd_poa(args: PoaArgs) {
                    reproduction) is deferred.",
         };
         let path = format!("{output_dir}/poa_config.json");
-        let file = File::create(&path).expect("poa_config.json の作成に失敗");
-        serde_json::to_writer_pretty(BufWriter::new(file), &config_json)
-            .expect("poa_config.json の書き込みに失敗");
+        write_json(&config_json, &path).expect("poa_config.json の書き込みに失敗");
     }
 
-    refresh_latest(&args.output_dir, &format!("{timestamp}_poa"));
+    let _ = refresh_latest_symlink(&args.output_dir, &format!("{timestamp}_poa"));
 
     let best = result.best_policy;
     println!(
