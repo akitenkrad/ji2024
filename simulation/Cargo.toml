@@ -1,0 +1,33 @@
+[package]
+name = "srap-simulation"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "srap_simulation"
+path = "src/lib.rs"
+
+[[bin]]
+name = "srap"
+path = "src/main.rs"
+
+[dependencies]
+rand        = { version = "0.8", features = ["small_rng"] }
+csv         = "1.3"
+serde       = { version = "1.0", features = ["derive"] }
+serde_json  = "1.0"
+clap        = { version = "4.5", features = ["derive"] }
+chrono      = "0.4"
+
+# social-simulation framework (socsim) — ABM のエンジン基盤．SRAP-Agent は公共希少資源
+# (公共住宅) を中央プールへ配分する «中央集権型» モデルで，応募者エージェントが中央の
+# 配分規則を介して間接的に競合する非空間・非ネットワークモデルなので core + engine に
+# 加え，LLM 駆動の応募意思決定のため LLM ヘルパ層 socsim-llm を取り込む (空間格子なし →
+# socsim-grid 不要; 中央配分 → socsim-net も不要)．socsim-llm の "live" feature が
+# ollama + openai 両バックエンド (FallbackClient) を有効化する (issue #21)．reqwest /
+# sha2 は使わない (socsim-llm が HTTP とプロンプトハッシュを所有する; han2023 / li2024 /
+# zhao2024 / chuang2024 と同一規約; 設計書 §4.2/§7 の reqwest+sha2 を上書き)．
+# 具体的 commit は Cargo.lock で固定する．
+socsim-core   = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-core" }
+socsim-engine = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-engine" }
+socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-llm", features = ["live"] }

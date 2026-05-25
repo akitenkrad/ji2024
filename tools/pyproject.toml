@@ -1,0 +1,20 @@
+[project]
+name = "srap-tools"
+version = "0.1.0"
+description = "Ji et al. (2024) SRAP-Agent scarce-resource allocation policy simulation — visualization & analysis tools"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "pandas>=2.2",
+]
+
+[project.scripts]
+srap-tools = "srap_tools.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/srap_tools"]

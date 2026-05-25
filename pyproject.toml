@@ -1,0 +1,13 @@
+[project]
+name = "ji2024-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "srap-tools",
+]
+
+[tool.uv.workspace]
+members = ["tools"]
+
+[tool.uv.sources]
+srap-tools = { workspace = true }
