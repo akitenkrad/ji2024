@@ -36,7 +36,7 @@ main = build_dispatcher(
             "srap_tools.show_experiment_settings:main",
         ),
         "reproduce": (
-            "論文 Table 2/3・Fig.4 一括再現 (Phase 3; 現状はスタブ案内)",
+            "論文 Table 2/3・Fig.4 の図示と照合 (srap reproduce の出力を読む)",
             "srap_tools.reproduce_paper:main",
         ),
     },

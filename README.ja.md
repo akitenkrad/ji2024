@@ -19,11 +19,12 @@ LLM 出力は socsim の bit 単位再現性の **外側** にある．したが
 
 > 本プロジェクトは LLM レイヤを `socsim-llm` クレートに標準化し，`reqwest` / `sha2` は使わない (socsim-llm が HTTP とプロンプトハッシュを所有する)．これは han2023 / li2024 / zhao2024 / chuang2024 の sibling と統一するため，設計書の当初の `reqwest`+`sha2` 案を上書きするものである．
 
-## フェーズ
+## 機能
 
-- **Phase 1** (実装済み): `SrapWorld` + 5 メカニズム + LLM クライアント層 + 単一ポリシー `run`．
-- **Phase 2** (実装済み): ポリシー因子の `sweep` + `visualize` / `visualize-sweep`．
-- **Phase 3** (`poa` は **最小スタブ**): 遺伝的アルゴリズムによるポリシー最適化外側ループ．`poa` サブコマンドは小さな GA (トーナメント選択 / 一様交叉 / 遺伝子単位の突然変異・エリート保存) を実行し，適応度は **1 回の決定論的 mock シミュレーション** とする (オフラインでテスト可能)．完成版 (予測器 f̃・ライブ LLM 適応度・論文 Table 2/3 + Fig.4 一括再現 `reproduce`) は未実装．
+- **`run`**: `SrapWorld` + 5 メカニズム + LLM クライアント層 + 単一ポリシー実行 (満足度・公平性指標)．
+- **`sweep`**: ポリシー因子の感度スイープ (入室条件 × 資源サブセット × 並び替え戦略)．
+- **`poa`** — Policy Optimization Agent: 配分ポリシー空間 `(E_queue, S_queue, R_queue, m, k, c)` 上の遺伝的アルゴリズム外側ループ (トーナメント選択 / 一様交叉 / 遺伝子単位の突然変異 / 1-エリート保存)．適応度は 1 回の SRAP 配分実行を `f_pi(metrics, objective)` で評価し，決定論的 scripted mock (`--mock`, オフライン・bit 決定論) かライブ LLM (Ollama→OpenAI + 永続キャッシュ) のいずれかで計算する．予測器 `f̃` サロゲート (評価済みポリシーの重み付き最近傍回帰) が «現行エリートに勝てない見込み» の個体のフル評価を枝刈りし，高価な評価を削減する．エリート保存により最良適応度は世代をまたいで単調非減少．
+- **`reproduce`**: 論文 Table 2 (ポリシー順序の社会的厚生)・Table 3 (POA 最適化ポリシー)・Figure 4 (POA 収束) を一括再現し，CSV + `reproduce_summary.json` (観測 vs 論文知見の PASS / off-anchor) と図を書き出す．
 
 ## インストールとクイックスタート
 
@@ -61,7 +62,7 @@ uv run srap-tools show-experiment-settings --results-dir results/latest
 # 専用 example
 cargo run --release --example mock_smoke -- results
 
-# または run / sweep / poa に --mock を付けて同じオフライン挙動
+# または run / sweep / poa / reproduce に --mock を付けて同じオフライン挙動
 cargo run --release -- run --entry-condition p_select --resource-subset r_size \
     --queues 3 --k 3 --c 2 --runs 3 --seed 42 --mock
 uv run srap-tools visualize
@@ -77,15 +78,25 @@ cargo run --release -- sweep \
     --runs 30 --seed 42            # オフラインなら --mock を付ける
 uv run srap-tools visualize-sweep
 
-# POA ポリシー最適化 (Phase-3 最小スタブ; 適応度 = 1 回の mock シミュレーション)
-cargo run --release -- poa --objective satisfaction --iterations 50 --pool-size 50 --seed 42
+# POA ポリシー最適化 (予測器 f̃ あり; オフラインなら --mock)
+cargo run --release -- poa --objective satisfaction \
+    --iterations 50 --pool-size 50 --use-predictor --seed 42
 uv run srap-tools visualize-sweep   # POA 収束曲線を描く
+```
+
+### 論文再現 (Table 2/3 + Fig.4)
+
+```bash
+# ポリシー順序の知見 + POA 最適化を一括再現 (オフライン)
+cargo run --release -- reproduce --mock --seed 42        # 高速スモークは --quick
+# 図を生成し観測 vs 論文の判定を再表示
+uv run srap-tools reproduce --results-dir results/latest
 ```
 
 ## テストと Lint
 
 ```bash
-cargo test --release   # mock (ScriptedClient) 駆動, ライブ LLM 不要 (44 テスト)
+cargo test --release   # mock (ScriptedClient) 駆動, ライブ LLM 不要 (52 テスト)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

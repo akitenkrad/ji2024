@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 入室条件 E_queue: どの応募者を待機キューへ入れるか (論文 Table 2 の行)．
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum EntryCondition {
     /// `p_budget`: 予算 (収入・支払い能力) の閾値で入室判定する．
     PBudget,
@@ -74,7 +74,7 @@ impl SortStrategy {
 }
 
 /// 資源サブセット R_queue: 応募者に可視化する資源の選び方 (論文 Table 2 の列)．
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ResourceSubset {
     /// `r_size`: 面積でソートしたサブセットを提示する．論文の最高 SW 条件．
     RSize,

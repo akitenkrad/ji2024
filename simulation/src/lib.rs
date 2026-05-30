@@ -6,7 +6,7 @@
 //! するポリシーの LLM 駆動シミュレーション» の公開 API を提供する．配分ポリシー
 //! `policy`・世界状態 `world`・LLM クライアント層 `llm`・プロンプト生成と応答パース
 //! `prompts`・更新メカニズム `mechanisms`・実行ドライバ `simulation`・評価指標
-//! `metrics`・ポリシー最適化 `poa` (Phase-3 スタブ) をモジュールとして公開し，
+//! `metrics`・ポリシー最適化 `poa` (GA + 予測器 f̃) をモジュールとして公開し，
 //! バイナリ (`srap`) と統合テストの双方から利用する．
 //!
 //! # 二層決定論
@@ -19,13 +19,12 @@
 //! 本スイートは han2023 / li2024 / zhao2024 / chuang2024 と統一して `socsim-llm`
 //! (issue #21/#26) に標準化したため `reqwest` / `sha2` は使わない．
 //!
-//! # フェーズ
+//! # 機能
 //!
-//! - **Phase 1** (本実装): SrapWorld + 5 mechanism + LLM クライアント層 + 単一
-//!   ポリシー `run`．
-//! - **Phase 2** (本実装): ポリシー因子の `sweep` + 可視化．
-//! - **Phase 3** (`poa` は最小スタブ): 遺伝的アルゴリズムによるポリシー最適化．
-//!   完成版 (予測器 f̃ + ライブ LLM 適応度 + 論文 Fig.4/Table 一括再現) は未実装．
+//! - 単一ポリシー `run`: SrapWorld + 5 mechanism + LLM クライアント層．
+//! - ポリシー因子の `sweep` + 可視化．
+//! - `poa`: 遺伝的アルゴリズム + 予測器 f̃ によるポリシー最適化 (mock / live 適応度)．
+//! - `reproduce`: 論文 Table 2/3・Fig.4 の一括再現 (ポリシー順序 + POA 最適化)．
 
 pub mod config;
 pub mod llm;

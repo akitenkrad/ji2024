@@ -19,11 +19,12 @@ The cache — not the model — is the reproducibility mechanism: a warm cache r
 
 > This project standardises on the `socsim-llm` crate for the LLM layer; it does **not** use `reqwest` or `sha2` (socsim-llm owns the HTTP transport and the prompt-cache hashing), overriding the design doc's original `reqwest`+`sha2` plan to stay consistent with the han2023 / li2024 / zhao2024 / chuang2024 siblings.
 
-## Phases
+## Capabilities
 
-- **Phase 1** (implemented): `SrapWorld` + the 5 mechanisms + the LLM client layer + the single-policy `run`.
-- **Phase 2** (implemented): the policy-factor `sweep` + `visualize` / `visualize-sweep`.
-- **Phase 3** (`poa` is a **minimal stub**): a genetic-algorithm policy-optimization outer loop. The `poa` subcommand runs a small GA (tournament selection / uniform crossover / per-gene mutation, elitism) whose fitness is **one deterministic mock simulation run** (so it is testable offline). The full POA — predictor f̃, live-LLM fitness, and the paper Table 2/3 + Fig. 4 reproduction (`reproduce`) — is deferred.
+- **`run`**: `SrapWorld` + the 5 mechanisms + the LLM client layer + a single-policy run (welfare & fairness metrics).
+- **`sweep`**: the policy-factor sensitivity sweep (entry conditions × resource subsets × sort strategies).
+- **`poa`** — the Policy Optimization Agent: a genetic-algorithm outer loop (tournament selection / uniform crossover / per-gene mutation / 1-elitism) over the allocation-policy parameter space `(E_queue, S_queue, R_queue, m, k, c)`. Fitness is one SRAP allocation run scored by `f_pi(metrics, objective)`, evaluated either with the deterministic scripted mock (`--mock`, offline / bit-deterministic) or with the live LLM (Ollama→OpenAI + persistent cache). A predictor `f̃` surrogate (weighted nearest-neighbour regression over already-evaluated policies) prunes full evaluations for candidates that the surrogate predicts cannot beat the current elite, cutting expensive evaluations. Elitism keeps the best fitness monotonically non-decreasing across generations.
+- **`reproduce`**: a one-command reproduction of the paper's Table 2 (policy-ordering social welfare), Table 3 (POA-optimized satisfaction/fairness policies) and Figure 4 (POA convergence), writing CSVs + `reproduce_summary.json` (observed vs paper-finding with PASS / off-anchor) and figures.
 
 ## Install & Quick start
 
@@ -61,7 +62,7 @@ The full round loop, output writers and Python visualization can be exercised wi
 # Dedicated example
 cargo run --release --example mock_smoke -- results
 
-# Or pass --mock to run / sweep / poa for the same offline behaviour
+# Or pass --mock to run / sweep / poa / reproduce for the same offline behaviour
 cargo run --release -- run --entry-condition p_select --resource-subset r_size \
     --queues 3 --k 3 --c 2 --runs 3 --seed 42 --mock
 uv run srap-tools visualize
@@ -77,15 +78,25 @@ cargo run --release -- sweep \
     --runs 30 --seed 42            # add --mock for offline
 uv run srap-tools visualize-sweep
 
-# POA policy optimization (Phase-3 minimal stub; fitness = one mock simulation)
-cargo run --release -- poa --objective satisfaction --iterations 50 --pool-size 50 --seed 42
+# POA policy optimization with the predictor f̃ (add --mock for offline)
+cargo run --release -- poa --objective satisfaction \
+    --iterations 50 --pool-size 50 --use-predictor --seed 42
 uv run srap-tools visualize-sweep   # plots the POA convergence curve
+```
+
+### Paper reproduction (Table 2/3 + Fig. 4)
+
+```bash
+# Reproduce the policy-ordering finding + POA optimization (offline)
+cargo run --release -- reproduce --mock --seed 42        # --quick for a fast smoke
+# Render the figures and re-print the observed-vs-paper verdict
+uv run srap-tools reproduce --results-dir results/latest
 ```
 
 ## Testing & Linting
 
 ```bash
-cargo test --release   # mock (ScriptedClient) driven, no live LLM (44 tests)
+cargo test --release   # mock (ScriptedClient) driven, no live LLM (52 tests)
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```

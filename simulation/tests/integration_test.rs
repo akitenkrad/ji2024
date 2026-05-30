@@ -15,7 +15,7 @@ use srap_simulation::llm::{wrap_client, SrapClient};
 use srap_simulation::metrics::{
     compute_metrics, f_pi, gini, inverse_order_pairs, AllocationOutcome, Objective,
 };
-use srap_simulation::poa::{run_poa, PoaConfig};
+use srap_simulation::poa::{run_poa, FitnessKind, PoaConfig, Predictor};
 use srap_simulation::policy::{Policy, ResourceSubset};
 use srap_simulation::simulation::run_with_client;
 
@@ -227,11 +227,10 @@ fn objective_changes_fitness_ordering() {
 // 最小 POA: 適応度が単調非減少 (エリート保存)
 // --------------------------------------------------------------------------- //
 
-#[test]
-fn poa_fitness_non_decreasing() {
-    let poa = PoaConfig {
+fn poa_cfg(use_predictor: bool, iterations: usize) -> PoaConfig {
+    PoaConfig {
         objective: Objective::Satisfaction,
-        iterations: 6,
+        iterations,
         pool_size: 6,
         mutation_rate: 0.3,
         tournament_size: 3,
@@ -243,8 +242,14 @@ fn poa_fitness_non_decreasing() {
             ..Config::default()
         },
         seed: 9,
-    };
-    let result = run_poa(&poa);
+        fitness_kind: FitnessKind::Mock,
+        use_predictor,
+    }
+}
+
+#[test]
+fn poa_fitness_non_decreasing() {
+    let result = run_poa(&poa_cfg(false, 6));
     assert_eq!(result.history.len(), 6);
     for w in result.history.windows(2) {
         assert!(
@@ -252,4 +257,100 @@ fn poa_fitness_non_decreasing() {
             "GA best fitness must be non-decreasing under elitism"
         );
     }
+}
+
+// --------------------------------------------------------------------------- //
+// 予測器 f̃: フル評価を削減し，エリート保存の単調非減少を壊さない
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn poa_predictor_reduces_full_evals_and_keeps_elitism() {
+    let with_pred = run_poa(&poa_cfg(true, 12));
+    let without = run_poa(&poa_cfg(false, 12));
+    // 予測器ありはフル評価が増えない (枝刈りで減るか同等)．
+    assert!(
+        with_pred.full_evals <= without.full_evals,
+        "predictor must not increase full evals: with={} without={}",
+        with_pred.full_evals,
+        without.full_evals
+    );
+    // 候補総数 (full + saved) は両経路で一致する．
+    assert_eq!(
+        with_pred.full_evals + with_pred.evals_saved,
+        without.full_evals + without.evals_saved
+    );
+    // 予測器ありでもエリート保存で単調非減少．
+    for w in with_pred.history.windows(2) {
+        assert!(w[1].best_fitness >= w[0].best_fitness - 1e-9);
+    }
+}
+
+// --------------------------------------------------------------------------- //
+// 予測器サロゲート: 厳密一致のリコールと最小サンプル
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn predictor_surrogate_sanity() {
+    let mut p = Predictor::default();
+    // 未学習 → None．
+    assert_eq!(p.predict(Policy::default()), None);
+    // 同一ポリシーを学習 → 厳密値．
+    p.observe(Policy::default(), 42.0);
+    assert_eq!(p.predict(Policy::default()), Some(42.0));
+    // 十分なサンプルで近傍回帰 → 有限値．
+    for i in 1..=5 {
+        p.observe(
+            Policy {
+                m: i.min(5),
+                ..Policy::default()
+            },
+            40.0 + i as f64,
+        );
+    }
+    let q = Policy {
+        k: 4,
+        ..Policy::default()
+    };
+    assert!(p.predict(q).map(|v| v.is_finite()).unwrap_or(false));
+}
+
+// --------------------------------------------------------------------------- //
+// reproduce (mock): ポリシー順序 SW(r_size) >= SW(r_random) を平均でも満たす
+// --------------------------------------------------------------------------- //
+
+#[test]
+fn reproduce_policy_ordering_holds_on_average() {
+    use srap_simulation::policy::EntryCondition;
+    // Table 2 の周辺平均 (entry を平均した r_size vs r_random) を matched seed で比較．
+    // matched seed: 同じ (entry, run) ペアに同一シードを与え，subset のみを変えて
+    // SW を比較する (論文の matched-seed 比較; ノイズを相殺する)．
+    let mean_sw = |subset: ResourceSubset| -> f64 {
+        let mut acc = 0.0;
+        let mut n = 0;
+        for (ei, entry) in EntryCondition::all().into_iter().enumerate() {
+            for run_idx in 0..3u64 {
+                let seed = 1000 + ei as u64 * 10 + run_idx; // subset に依存しない matched seed．
+                let cfg = Config {
+                    policy: Policy {
+                        entry_condition: entry,
+                        resource_subset: subset,
+                        ..Policy::default()
+                    },
+                    seed: Some(seed),
+                    ..base_config()
+                };
+                acc += run_with_client(&cfg, scripted_first_home(), 0)
+                    .unwrap()
+                    .final_sw();
+                n += 1;
+            }
+        }
+        acc / n as f64
+    };
+    let sw_size = mean_sw(ResourceSubset::RSize);
+    let sw_rand = mean_sw(ResourceSubset::RRandom);
+    assert!(
+        sw_size >= sw_rand,
+        "reproduce ordering: mean SW(r_size)={sw_size} >= SW(r_random)={sw_rand}"
+    );
 }

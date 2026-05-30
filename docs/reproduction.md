@@ -33,7 +33,16 @@ SW(`r_size`) > SW(`r_random`) holds — the paper's key qualitative finding (siz
 ## Design uncertainties (paper §7)
 
 - The synthetic environment (applicant count, resource count, profile distributions) is not specified in the paper body — externalised via CLI (`--n-applicants`, `--pool-ratio`, `--visible-subset-size`) with defaults (60 applicants, ratio 0.5).
-- The POA predictor f̃, the GA hyperparameters (pool size, crossover/mutation rates) and the policy-vector decode are appendix-dependent — the `poa` subcommand is a **minimal Phase-3 stub** (fitness = one mock simulation; predictor f̃ and live-LLM fitness deferred).
+- The GA hyperparameters (pool size, crossover/mutation rates) and the predictor `f̃` margin are appendix-dependent and externalised as CLI flags with standard defaults. The `poa` subcommand evaluates fitness with either the deterministic mock or the live LLM, and the predictor `f̃` (a nearest-neighbour surrogate) prunes full evaluations; because the appendix values are not in the paper body, the SW *ordering* and the POA *improvement direction* — not absolute fitness — are the reproduction targets.
+
+## One-command reproduction (`reproduce`)
+
+```bash
+cargo run --release -- reproduce --mock --seed 42      # --quick for a fast smoke
+uv run srap-tools reproduce --results-dir results/latest   # render figures
+```
+
+`reproduce` runs Table 2 as a **matched-seed paired** comparison (same environment, vary only the resource subset) and reports the fraction of environments where SW(`r_size`) ≥ SW(`r_random`) — a paired win-rate is far more robust than comparing means across independent seeds, because the synthetic rent-over-budget penalty makes per-environment SW noisy. It then runs the POA for both objectives (Table 3 `π_s*` / `π_f*`) and emits the per-objective convergence history (Fig. 4). The PASS criterion is the paper's core finding (`r_size` highest / `r_random` lowest) plus a non-decreasing POA trend; `reproduce_summary.json` records observed vs paper-finding per check.
 
 ## Real-Ollama smoke (for the main session)
 
