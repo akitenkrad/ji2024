@@ -39,10 +39,10 @@ SW(`r_size`) > SW(`r_random`) holds — the paper's key qualitative finding (siz
 
 ```bash
 cargo run --release -- reproduce --mock --seed 42      # --quick for a fast smoke
-uv run srap-tools reproduce --results-dir results/latest   # render figures
+uv run srap-tools reproduce   # render figures
 ```
 
-`reproduce` runs Table 2 as a **matched-seed paired** comparison (same environment, vary only the resource subset) and reports the fraction of environments where SW(`r_size`) ≥ SW(`r_random`) — a paired win-rate is far more robust than comparing means across independent seeds, because the synthetic rent-over-budget penalty makes per-environment SW noisy. It then runs the POA for both objectives (Table 3 `π_s*` / `π_f*`) and emits the per-objective convergence history (Fig. 4). The PASS criterion is the paper's core finding (`r_size` highest / `r_random` lowest) plus a non-decreasing POA trend; `reproduce_summary.json` records observed vs paper-finding per check.
+`reproduce` runs Table 2 as a **matched-seed paired** comparison (same environment, vary only the resource subset) and reports the fraction of environments where SW(`r_size`) ≥ SW(`r_random`) — a paired win-rate is far more robust than comparing means across independent seeds, because the synthetic rent-over-budget penalty makes per-environment SW noisy. It then runs the POA for both objectives (Table 3 `π_s*` / `π_f*`) and emits the per-objective convergence history (Fig. 4). The PASS criterion is the paper's core finding (`r_size` highest / `r_random` lowest) plus a non-decreasing POA trend; `artifacts/reproduce_summary.json` records observed vs paper-finding per check (the win-rate band is this implementation's, not the paper's, so it is not a metric and not a reference value).
 
 ## Real-Ollama smoke (for the main session)
 

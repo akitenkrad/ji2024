@@ -30,6 +30,8 @@ clap        = { version = "4.5", features = ["derive"] }
 socsim-core   = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-core" }
 socsim-engine = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-engine" }
 socsim-llm    = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-llm", features = ["live"] }
-# 出力ヘルパ (timestamp / run-dir / latest symlink / CSV・JSON writer)．
-# ライブラリモードのボイラープレートを集約した共有クレット．
-socsim-results = { git = "https://github.com/akitenkrad/rs-social-simulation-tools", branch = "main", package = "socsim-results" }
+# runvault — 実験記録基盤．run ディレクトリ・config.json・metrics.csv・events.jsonl・
+# manifest を持つ．出力の置き場と同一性はこちらに預けるので，socsim-results
+# (timestamp / latest symlink / CSV・JSON 書き出し) はもう使わない．
+# git 依存．具体的な commit は Cargo.lock で固定される．
+runvault = { git = "https://github.com/akitenkrad/rs-runvault", branch = "main" }

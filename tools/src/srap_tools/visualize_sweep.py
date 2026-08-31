@@ -2,16 +2,19 @@
 """
 visualize_sweep.py — Ji et al. (2024) SRAP-Agent スイープ / POA 可視化スクリプト
 
-results/latest (または --sweep_dir 指定先) の sweep_summary.csv があれば
-ポリシー因子 (入室条件 × 資源サブセット) 依存の SW を，poa_history.csv があれば
-POA の適応度収束曲線を可視化する．
+`sweep` の親 run (または `poa` の run) を読み，ポリシー因子 (入室条件 × 資源
+サブセット) 依存の SW と，POA の適応度収束曲線を可視化する．旧
+`sweep_summary.csv` の 1 行は «セル 1 つの試行 1 本» で，いまはセル座標を
+`parameters` に持つ子 run 1 本にあたる (`srap_tools.runs.sweep_table` が
+同じ列の表に組み直す)．POA の世代パネルは `x.ji2024.poa_generation` イベント．
 
 Usage:
     uv run srap-tools visualize-sweep
-    uv run srap-tools visualize-sweep --sweep_dir results/20260525_120000_sweep
+    uv run srap-tools visualize-sweep --sweep_dir results/20260525_120000_sweep  # legacy も可
+    uv run srap-tools visualize-sweep --subcommand poa
 
 Outputs (存在するデータに応じて):
-    output_dir/
+    <results-root>/<experiment>/figures/<run_slug>/
     ├── sweep_sw_by_subset.png   ← 資源サブセット別の平均 SW (入室条件で色分け)
     └── poa_convergence.png      ← POA 適応度 f(π) の世代収束曲線
 """
@@ -24,6 +27,8 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from srap_tools import runs
 
 plt.rcParams["font.family"] = "Hiragino Sans"
 
@@ -110,46 +115,69 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sweep-dir",
         "--results_dir",
         "--results-dir",
-        default="results/latest",
-        help="スイープ / POA の出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="スイープ / POA の run ディレクトリ (省略時は runvault path --latest)",
+    )
+    p.add_argument(
+        "--subcommand",
+        default="sweep",
+        choices=("sweep", "poa"),
+        help="--sweep_dir 省略時にどの run を探すか (default: sweep)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="results root (default: results)",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先 (default: {sweep_dir}/figures)",
+        help="図の保存先 (default: <results-root>/<experiment>/figures/<run_slug>)",
     )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.sweep_dir, "figures")
-    os.makedirs(out_dir, exist_ok=True)
+    run_dir = runs.resolve_run_dir(
+        args.sweep_dir, subcommand=args.subcommand, results_root=args.results_root
+    )
+    out_dir = str(runs.analysis_output_dir(run_dir, args.output_dir))
 
     print("=== Ji et al. (2024) SRAP-Agent スイープ / POA 可視化 ===")
-    print(f"結果:   {args.sweep_dir}")
+    print(f"結果:   {run_dir}")
     print(f"出力先: {out_dir}")
     print("-----------------------------------------")
 
-    sweep_path = os.path.join(args.sweep_dir, "sweep_summary.csv")
-    poa_path = os.path.join(args.sweep_dir, "poa_history.csv")
     produced = False
 
-    if os.path.exists(sweep_path):
-        print("[sweep] 資源サブセット別 SW を保存中 ...")
-        df = pd.read_csv(sweep_path)
-        save_sweep_sw_by_subset(df, os.path.join(out_dir, "sweep_sw_by_subset.png"))
-        produced = True
-    if os.path.exists(poa_path):
+    subcommand = (
+        runs.subcommand_of(run_dir) if runs.is_runvault_run(run_dir) else None
+    )
+    if subcommand in (None, "sweep"):
+        try:
+            df = runs.sweep_table(run_dir)
+        except (FileNotFoundError, SystemExit):
+            df = None
+        if df is not None and not df.empty:
+            print("[sweep] 資源サブセット別 SW を保存中 ...")
+            save_sweep_sw_by_subset(df, os.path.join(out_dir, "sweep_sw_by_subset.png"))
+            produced = True
+
+    history = runs.poa_history(run_dir)
+    if history:
         print("[poa] 適応度収束曲線を保存中 ...")
-        df = pd.read_csv(poa_path)
+        # `poa` は 1 目標なのでそのまま描く (2 目標の `reproduce` は
+        # `srap-tools reproduce` が Fig.4 として重ねて描く)．
+        _, df = sorted(history.items())[0]
         save_poa_convergence(df, os.path.join(out_dir, "poa_convergence.png"))
         produced = True
 
     if not produced:
         raise FileNotFoundError(
-            f"sweep_summary.csv も poa_history.csv も見つかりません: {args.sweep_dir}"
+            f"スイープの子 run も POA の世代パネルも見つかりません: {run_dir}"
         )
 
     print("-----------------------------------------")

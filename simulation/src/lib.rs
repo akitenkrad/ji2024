@@ -33,5 +33,6 @@ pub mod metrics;
 pub mod poa;
 pub mod policy;
 pub mod prompts;
+pub mod record;
 pub mod simulation;
 pub mod world;

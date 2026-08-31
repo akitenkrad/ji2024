@@ -1,18 +1,20 @@
 """srap-tools show-experiment-settings — 実行結果の設定表示．
 
-results/{timestamp}/config.json (run) / sweep_config.json (sweep) /
-poa_config.json (poa) を読み，実行時に使われた全パラメータを整形表示する．
-存在すれば llm_meta.json の LLM 情報も併せて表示する．`results/latest` も解決される．
+runvault の run ディレクトリの `config.json` (封筒．条件は `parameters` の下) を
+読み，実行時に使われた全パラメータを整形表示する．どのサブコマンドの run かは
+`run.json` の `subcommand` が答える．旧 `llm_meta.json` の中身は run スコープの指標
+(`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`) と `run.json` の `llm`
+ブロックへ移ったので，そちらから拾う．legacy な flat `config.json` /
+`sweep_config.json` / `poa_config.json` / `llm_meta.json` も従来どおり読める．
+
+run ディレクトリのパスは次で取れる:
+    runvault path --experiment srap-allocation --latest --subcommand run
+    runvault path --experiment srap-allocation --latest --subcommand sweep
 
 Usage:
     srap-tools show-experiment-settings
     srap-tools show-experiment-settings --results-dir results/20260525_120000
-    srap-tools show-experiment-settings --results-dir results/latest --json
-
-I/O (results-dir 解決・llm_meta ロード) と run 設定テーブルは共有ヘルパ
-`socsim_tools` に委譲する (出力はバイト等価)．sweep / poa 設定テーブル，複合行を
-持つ LLM メタブロック (`final_round`/`final_sw`/`final_n_allocated` 等を含み列幅も
-異なる)，および `--json` の `kind` フィールドは srap 固有なので本モジュールに残す．
+    srap-tools show-experiment-settings --json
 """
 
 from __future__ import annotations
@@ -22,12 +24,11 @@ import json
 import sys
 from pathlib import Path
 
-from socsim_tools.io import load_run_metadata, resolve_results_dir
-from socsim_tools.settings import render_run_config
+from runvault.read import config_parameters, load_run_meta, run_scope_metrics
+
+from srap_tools import runs
 
 # config キー → 表示ラベル (右コロン位置を揃えるため空白パディング済み)．
-# render_run_config が `f"{label}: {value}"` で整形するため，ラベルは末尾の
-# `: ` を含めず，従来の run レンダラと同じ桁揃えになるようパディングする．
 FIELD_LABELS = {
     "n_applicants": "応募者数 n_applicants ",
     "pool_ratio": "プール比 pool_ratio   ",
@@ -40,66 +41,92 @@ FIELD_LABELS = {
     "c": "選択キュー容量係数 c  ",
     "max_rounds": "最大ラウンド          ",
     "visible_subset_size": "可視サブセットサイズ  ",
+    "decision_mode": "駆動方式 (mock/live)  ",
     "seed": "シード (コア)         ",
+    "base_seed": "シード基点            ",
+    "runs": "試行数 runs           ",
+    "objective": "最適化目標 objective  ",
+    "iterations": "反復世代数 iterations ",
+    "pool_size": "個体群サイズ          ",
+    "mutation_rate": "突然変異率            ",
+    "tournament_size": "トーナメントサイズ    ",
+    "use_predictor": "予測器で枝刈り        ",
+    "poa_iterations": "POA 世代数            ",
+    "poa_pool_size": "POA 個体群サイズ      ",
+    "poa_mutation_rate": "POA 突然変異率        ",
+    "poa_tournament_size": "POA トーナメント      ",
+    "poa_use_predictor": "POA 予測器で枝刈り    ",
+    "quick": "短縮モード quick      ",
     "llm_temperature": "LLM 温度              ",
     "llm_seed": "LLM seed              ",
+    "llm_cache_path": "LLM キャッシュ        ",
+    # legacy 用．
+    "queues": "キュー数 m            ",
+    "fitness_kind": "適応度評価            ",
     "output_dir": "出力先                ",
 }
 
+#: 格子 (親 run) が持つリスト項目．
+LIST_KEYS = {
+    "entry_conditions": "入室条件 候補     ",
+    "resource_subsets": "資源サブセット候補",
+    "queue_strategies": "並び替え 候補     ",
+}
 
-def _find_config_file(results_dir: Path) -> tuple[Path, str]:
-    """config.json (run) / sweep_config.json (sweep) / poa_config.json (poa) を探す．"""
-    for name, kind in (
-        ("config.json", "run"),
-        ("sweep_config.json", "sweep"),
-        ("poa_config.json", "poa"),
-    ):
+
+def render_config(cfg: dict, run_dir: Path, subcommand: str) -> str:
+    lines = ["=" * 70, f"実行設定 ({subcommand})", "=" * 70, f"run: {run_dir}", "-" * 70]
+    for key, label in LIST_KEYS.items():
+        if key in cfg:
+            lines.append(f"{label}: {', '.join(str(v) for v in cfg[key])}")
+    for key, label in FIELD_LABELS.items():
+        if key in cfg:
+            lines.append(f"{label}: {cfg[key]}")
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+def render_llm(meta: dict, scoped: dict) -> str:
+    """`run.json` の `llm` ブロックと LLM 指標を表示する (旧 `llm_meta.json`)．"""
+    llm = meta.get("llm") or {}
+    lines = ["", "LLM 実行メタデータ (run.json の llm ブロック + run スコープ指標)", "-" * 70]
+    lines.append(f"provider      : {llm.get('provider', '-')}")
+    lines.append(f"モデル        : {llm.get('model_snapshot', '-')}")
+    lines.append(f"温度          : {llm.get('temperature', '-')}")
+    for name, label in (("llm_calls", "呼び出し総数  "), ("llm_cache_hits", "cache-hit     ")):
+        if name in scoped:
+            lines.append(f"{label}: {int(scoped[name])}")
+    if "llm_cache_hit_rate" in scoped:
+        lines.append(f"cache-hit 率  : {scoped['llm_cache_hit_rate'] * 100:.1f}%")
+    if "final_round" in scoped:
+        lines.append(f"最終ラウンド  : {int(scoped['final_round'])}")
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# legacy (移行前の flat な JSON)
+# --------------------------------------------------------------------------- #
+
+LEGACY_FILES = (("config.json", "run"), ("sweep_config.json", "sweep"), ("poa_config.json", "poa"))
+
+
+def _legacy(results_dir: Path) -> tuple[dict, str, dict | None]:
+    for name, kind in LEGACY_FILES:
         path = results_dir / name
         if path.exists():
-            return path, kind
+            with path.open() as f:
+                cfg = json.load(f)
+            meta_path = results_dir / "llm_meta.json"
+            meta = json.loads(meta_path.read_text()) if meta_path.exists() else None
+            return cfg, kind, meta
     raise FileNotFoundError(
         f"設定ファイルが見つかりません: {results_dir}\n"
-        f"  期待: config.json (run) / sweep_config.json (sweep) / poa_config.json (poa)"
+        "  期待: run.json (runvault) / config.json / sweep_config.json / poa_config.json"
     )
 
 
-def render_sweep_config(cfg: dict, source: Path) -> str:
-    """sweep 設定テーブルを整形する (srap 固有; リスト項目を `, ` 連結する)．"""
-    lines = ["=" * 70, "実行設定 (sweep)", "=" * 70, f"設定ファイル: {source}", "-" * 70]
-    lines.append(f"入室条件 候補    : {', '.join(map(str, cfg.get('entry_conditions', [])))}")
-    lines.append(f"資源サブセット候補: {', '.join(map(str, cfg.get('resource_subsets', [])))}")
-    lines.append(f"並び替え 候補    : {', '.join(map(str, cfg.get('queue_strategies', [])))}")
-    lines.append(f"応募者数         : {cfg.get('n_applicants', '-')}")
-    lines.append(f"プール比         : {cfg.get('pool_ratio', '-')}")
-    lines.append(f"m / k / c        : {cfg.get('queues', '-')} / {cfg.get('k', '-')} / {cfg.get('c', '-')}")
-    lines.append(f"最大ラウンド     : {cfg.get('max_rounds', '-')}")
-    lines.append(f"試行数 runs      : {cfg.get('runs', '-')}")
-    lines.append(f"シード基点       : {cfg.get('seed', '-')}")
-    lines.append("=" * 70)
-    return "\n".join(lines)
-
-
-def render_poa_config(cfg: dict, source: Path) -> str:
-    """poa 設定テーブルを整形する (srap 固有; 複合行・note 注記あり)．"""
-    lines = ["=" * 70, "実行設定 (poa; Phase-3 最小スタブ)", "=" * 70, f"設定ファイル: {source}", "-" * 70]
-    lines.append(f"最適化目標 objective : {cfg.get('objective', '-')}")
-    lines.append(f"反復世代数 iterations: {cfg.get('iterations', '-')}")
-    lines.append(f"個体群サイズ pool_size: {cfg.get('pool_size', '-')}")
-    lines.append(f"突然変異率           : {cfg.get('mutation_rate', '-')}")
-    lines.append(f"トーナメントサイズ   : {cfg.get('tournament_size', '-')}")
-    lines.append(f"応募者数 / プール比  : {cfg.get('n_applicants', '-')} / {cfg.get('pool_ratio', '-')}")
-    lines.append(f"最大ラウンド         : {cfg.get('max_rounds', '-')}")
-    lines.append(f"シード               : {cfg.get('seed', '-')}")
-    note = cfg.get("note")
-    if note:
-        lines.append("-" * 70)
-        lines.append(f"注記: {note}")
-    lines.append("=" * 70)
-    return "\n".join(lines)
-
-
-def render_llm_meta(meta: dict) -> str:
-    """LLM メタブロックを整形する (srap 固有; final_round/SW/n_allocated 等を含む)．"""
+def render_legacy_llm(meta: dict) -> str:
     lines = ["", "LLM 実行メタデータ (llm_meta.json)", "-" * 70]
     lines.append(f"モデル        : {meta.get('llm_model', '-')}")
     lines.append(f"endpoint      : {meta.get('llm_endpoint', '-')}")
@@ -113,10 +140,6 @@ def render_llm_meta(meta: dict) -> str:
     lines.append(f"最終ラウンド  : {meta.get('final_round', '-')}")
     lines.append(f"最終 SW       : {meta.get('final_sw', '-')}")
     lines.append(f"配分人数      : {meta.get('final_n_allocated', '-')}")
-    note = meta.get("determinism_note")
-    if note:
-        lines.append("-" * 70)
-        lines.append(f"注記: {note}")
     lines.append("=" * 70)
     return "\n".join(lines)
 
@@ -130,38 +153,63 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--results-dir",
         "--results_dir",
-        default="results/latest",
-        help="実行結果ディレクトリ (default: results/latest)",
+        default=None,
+        help="run ディレクトリ (省略時は runvault path --latest)",
+    )
+    parser.add_argument(
+        "--subcommand",
+        default="run",
+        help="--results-dir 省略時にどの run を探すか (default: run)",
+    )
+    parser.add_argument(
+        "--results-root",
+        "--results_root",
+        default="results",
+        help="results root (default: results)",
     )
     parser.add_argument("--json", action="store_true", help="表ではなく JSON 形式で出力する．")
     args = parser.parse_args(argv)
 
-    results_dir = resolve_results_dir(args.results_dir)
-    if not results_dir.exists():
-        print(f"エラー: ディレクトリが存在しません: {results_dir}", file=sys.stderr)
+    run_dir = runs.resolve_run_dir(
+        args.results_dir, subcommand=args.subcommand, results_root=args.results_root
+    )
+    if not run_dir.exists():
+        print(f"エラー: ディレクトリが存在しません: {run_dir}", file=sys.stderr)
         return 1
 
+    if runs.is_runvault_run(run_dir):
+        meta = load_run_meta(run_dir)
+        assert meta is not None
+        cfg = config_parameters(run_dir) or {}
+        scoped = run_scope_metrics(run_dir)
+        subcommand = meta["subcommand"]
+        if args.json:
+            payload = {
+                "run_dir": str(run_dir),
+                "subcommand": subcommand,
+                "parameters": cfg,
+                "llm": meta.get("llm"),
+                "run_scope_metrics": scoped,
+            }
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(render_config(cfg, run_dir, subcommand))
+            if meta.get("llm") is not None:
+                print(render_llm(meta, scoped))
+        return 0
+
     try:
-        cfg_path, kind = _find_config_file(results_dir)
+        cfg, kind, legacy_meta = _legacy(run_dir)
     except FileNotFoundError as exc:
         print(f"エラー: {exc}", file=sys.stderr)
         return 1
-    with cfg_path.open() as f:
-        cfg = json.load(f)
-    meta = load_run_metadata(results_dir)
-
     if args.json:
-        payload = {"source": str(cfg_path), "kind": kind, "config": cfg, "llm_meta": meta}
+        payload = {"run_dir": str(run_dir), "kind": kind, "config": cfg, "llm_meta": legacy_meta}
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        if kind == "run":
-            print(render_run_config(cfg, cfg_path, FIELD_LABELS))
-        elif kind == "sweep":
-            print(render_sweep_config(cfg, cfg_path))
-        else:
-            print(render_poa_config(cfg, cfg_path))
-        if meta is not None:
-            print(render_llm_meta(meta))
+        print(render_config(cfg, run_dir, f"{kind}; legacy"))
+        if legacy_meta is not None:
+            print(render_legacy_llm(legacy_meta))
     return 0
 
 

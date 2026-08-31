@@ -2,19 +2,20 @@
 """
 visualize.py — Ji et al. (2024) SRAP-Agent 単一実行結果 可視化スクリプト
 
-results/latest (または --results_dir 指定先) の metrics.csv を読み，
+`run` の親 run (指定が無ければ `runvault path --latest --subcommand run`) から
+試行ごとの子 run を辿り，
 (1) 満足度・公平性指標のラウンド時系列 (社会的厚生 SW・Avg r_size・Gini・F(V,NV)) と，
 (2) 最終ラウンドの指標サマリ (棒グラフ)
-を生成する．metrics.csv は long-format (run, round + 指標列) で複数試行を含みうるため，
-ラウンドごとに試行平均を取って描画する．
+を生成する．試行は子 run に分かれているので，旧 `metrics.csv` と同じ
+(run, round + 指標列) の表に組み直してから，ラウンドごとに試行平均を取って描画する．
 
 Usage:
     uv run srap-tools visualize
-    uv run srap-tools visualize --results_dir results/20260525_120000
+    uv run srap-tools visualize --results_dir results/20260525_120000   # legacy も可
     uv run srap-tools visualize --output_dir out
 
 Outputs:
-    output_dir/
+    <results-root>/<experiment>/figures/<run_slug>/
     ├── welfare_timeseries.png   ← SW / Avg r_size の時系列 (満足度)
     ├── fairness_timeseries.png  ← Gini / F(V,NV) の時系列 (公平性)
     └── final_metrics.png        ← 最終ラウンドの指標サマリ (棒グラフ)
@@ -27,6 +28,8 @@ import os
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+from srap_tools import runs
 
 # --------------------------------------------------------------------------- #
 # 日本語フォント設定
@@ -41,14 +44,6 @@ COLOR_SW = "#1565C0"
 COLOR_RSIZE = "#2E7D32"
 COLOR_GINI = "#C62828"
 COLOR_FVNV = "#6A1B9A"
-
-
-def load_metrics(results_dir: str) -> pd.DataFrame:
-    """metrics.csv (long-format: run, round + 指標列) を読む．"""
-    path = os.path.join(results_dir, "metrics.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"metrics.csv が見つかりません: {path}")
-    return pd.read_csv(path)
 
 
 def round_means(df: pd.DataFrame) -> pd.DataFrame:
@@ -165,14 +160,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--results_dir",
         "--results-dir",
-        default="results/latest",
-        help="Rust シミュレーションの出力ディレクトリ (default: results/latest)",
+        default=None,
+        help="run ディレクトリ (省略時は runvault path --latest --subcommand run)",
+    )
+    p.add_argument(
+        "--results_root",
+        "--results-root",
+        default="results",
+        help="results root (default: results)",
     )
     p.add_argument(
         "--output_dir",
         "--output-dir",
         default=None,
-        help="図の保存先ディレクトリ (default: {results_dir}/figures)",
+        help="図の保存先ディレクトリ (default: <results-root>/<experiment>/figures/<run_slug>)",
     )
     return p.parse_args(argv)
 
@@ -180,15 +181,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
-    out_dir = args.output_dir if args.output_dir else os.path.join(args.results_dir, "figures")
-    os.makedirs(out_dir, exist_ok=True)
+    run_dir = runs.resolve_run_dir(
+        args.results_dir, subcommand="run", results_root=args.results_root
+    )
+    out_dir = str(runs.analysis_output_dir(run_dir, args.output_dir))
 
     print("=== Ji et al. (2024) SRAP-Agent 単一実行結果 可視化 ===")
-    print(f"結果:   {args.results_dir}")
+    print(f"結果:   {run_dir}")
     print(f"出力先: {out_dir}")
     print("-----------------------------------------")
 
-    df = load_metrics(args.results_dir)
+    df = runs.pooled_metrics(run_dir)
     agg = round_means(df)
     print(f"      {df['round'].nunique()} ラウンド × {df['run'].nunique()} 試行")
 

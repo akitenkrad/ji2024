@@ -10,8 +10,6 @@
 //! > 既定値 (応募者 60 人・pool_ratio 0.5 など) を CLI で外部化し，論文付録判明後に
 //! > 差し替える方針とする．
 
-use serde::Serialize;
-
 use crate::policy::Policy;
 
 // --------------------------------------------------------------------------- //
@@ -46,8 +44,6 @@ pub struct Config {
     pub seed: Option<u64>,
     /// LLM レイヤ設定．
     pub llm: LlmSettings,
-    /// 結果出力ディレクトリ．
-    pub output_dir: String,
 }
 
 impl Default for Config {
@@ -60,7 +56,6 @@ impl Default for Config {
             visible_subset_size: 5,
             seed: Some(42),
             llm: LlmSettings::default(),
-            output_dir: "results".to_string(),
         }
     }
 }
@@ -75,51 +70,6 @@ impl Config {
 /// `run` の試行シードを派生する (試行 index で独立化する)．
 pub fn derive_run_seed(base: u64, run_idx: usize) -> u64 {
     socsim_core::derive_seed(base, &[run_idx as u64])
-}
-
-/// `config.json` (run 用) のシリアライズ表現．
-#[derive(Serialize)]
-pub struct RunConfigJson {
-    pub command: &'static str,
-    pub n_applicants: usize,
-    pub pool_ratio: f64,
-    pub n_resources: usize,
-    pub entry_condition: String,
-    pub sort_strategy: String,
-    pub resource_subset: String,
-    pub m: usize,
-    pub k: usize,
-    pub c: usize,
-    pub max_rounds: usize,
-    pub visible_subset_size: usize,
-    pub seed: Option<u64>,
-    pub llm_temperature: f32,
-    pub llm_seed: u64,
-    pub output_dir: String,
-}
-
-impl Config {
-    /// `config.json` 用の表現を組み立てる．
-    pub fn to_run_config_json(&self) -> RunConfigJson {
-        RunConfigJson {
-            command: "run",
-            n_applicants: self.n_applicants,
-            pool_ratio: self.pool_ratio,
-            n_resources: self.n_resources(),
-            entry_condition: self.policy.entry_condition.label().to_string(),
-            sort_strategy: self.policy.sort_strategy.label().to_string(),
-            resource_subset: self.policy.resource_subset.label().to_string(),
-            m: self.policy.m,
-            k: self.policy.k,
-            c: self.policy.c,
-            max_rounds: self.max_rounds,
-            visible_subset_size: self.visible_subset_size,
-            seed: self.seed,
-            llm_temperature: self.llm.temperature,
-            llm_seed: self.llm.seed,
-            output_dir: self.output_dir.clone(),
-        }
-    }
 }
 
 #[cfg(test)]

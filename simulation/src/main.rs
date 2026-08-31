@@ -1,31 +1,42 @@
 //! Ji et al. (2024) "SRAP-Agent" — 再現実験の CLI エントリポイント．
 //!
 //! `run`       : 単一ポリシー π で LLM 駆動の希少資源配分シミュレーションを実行し，
-//!               社会的厚生 (SW)・公平性指標を計算する．
-//! `sweep`     : 入室条件 × 資源サブセット (× 並び替え戦略) を走査し，最終 SW を
-//!               `sweep_summary.csv` に集計する (論文 Table 2 の感度分析)．
+//!               社会的厚生 (SW)・公平性指標を計算する (親 run 1 本 + 試行ごとの子 run)．
+//! `sweep`     : 入室条件 × 資源サブセット (× 並び替え戦略) を走査する
+//!               (論文 Table 2 の感度分析; 親 run 1 本 + 試行ごとの子 run)．
 //! `poa`       : 遺伝的アルゴリズム + 予測器 f̃ によるポリシー最適化 (mock / live)．
 //! `reproduce` : 論文 Table 2/3・Fig.4 を一括再現する (ポリシー順序 + POA 最適化)．
+//!
+//! 出力の置き場と同一性は runvault に預ける — タイムスタンプ付きディレクトリも
+//! `latest` シンボリックリンクも自前では作らず，`Run::start` が決めた run
+//! ディレクトリがそのまま出力先になる．`config.json` / `metrics.csv` /
+//! `sweep_summary.csv` / `sweep_config.json` / `poa_config.json` /
+//! `poa_history.csv` / `llm_meta.json` / `table2_*.csv` / `table3_*.csv` の
+//! 自前の書き出しはすべて `crate::record` 経由の記録に置き換わっている．
+//! 何をどこへ置いたかは `record` のモジュール docs を参照．
 
 use std::fs;
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
-use socsim_results::{refresh_latest_symlink, timestamp, write_csv, write_json};
+use runvault::{Lineage, Llm, Run, RunOptions};
 
 use socsim_llm::mock::ScriptedClient;
-use socsim_llm::PromptCache;
-use srap_simulation::config::{derive_run_seed, Config, LlmSettings};
-use srap_simulation::llm::wrap_client;
+use socsim_llm::{LlmClient, PromptCache};
+use srap_simulation::config::{Config, LlmSettings};
+use srap_simulation::llm::{build_live_client, wrap_client, SrapClient};
 use srap_simulation::metrics::{parse_objective, Objective};
-use srap_simulation::poa::{run_poa, FitnessKind, PoaConfig};
+use srap_simulation::poa::{run_poa, FitnessKind, PoaConfig, PoaResult};
 use srap_simulation::policy::{
     parse_entry_condition, parse_resource_subset, parse_sort_strategy, EntryCondition, Policy,
     ResourceSubset, SortStrategy,
 };
-use srap_simulation::simulation::{
-    ensure_output_dir, run_with_client, save_llm_meta, save_metrics, SimulationResult,
+use srap_simulation::record::{
+    self, ConditionParameters, EnvParameters, LlmParameters, PoaParameters,
+    ReplicateGroupParameters, ReproduceParameters, SweepGridParameters, TrialParameters, DOMAIN,
+    EXPERIMENT, GROUP_SEED_POINTERS, HASH_EXCLUDE, REPO_ID, TRIAL_SEED_POINTERS,
 };
+use srap_simulation::simulation::{run_with_client, SimulationResult};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -322,68 +333,6 @@ struct ReproduceArgs {
 }
 
 // ---------------------------------------------------------------------------
-// 出力構造体
-// ---------------------------------------------------------------------------
-
-/// `sweep_summary.csv` の 1 行．
-#[derive(serde::Serialize)]
-struct SweepRow {
-    entry_condition: String,
-    resource_subset: String,
-    queue_strategy: String,
-    run: usize,
-    seed: u64,
-    final_round: usize,
-    final_sw: f64,
-    final_avg_rsize: f64,
-    final_avg_wt: f64,
-    final_var_rsize: f64,
-    final_rop: f64,
-    final_co_gini: f64,
-    final_f_vnv: f64,
-    n_allocated: usize,
-    cache_hit_rate: f64,
-}
-
-/// `sweep_config.json` の構造体．
-#[derive(serde::Serialize)]
-struct SweepConfigJson {
-    command: &'static str,
-    entry_conditions: Vec<String>,
-    resource_subsets: Vec<String>,
-    queue_strategies: Vec<String>,
-    n_applicants: usize,
-    pool_ratio: f64,
-    queues: usize,
-    k: usize,
-    c: usize,
-    max_rounds: usize,
-    runs: usize,
-    seed: u64,
-    llm_temperature: f32,
-    llm_seed: u64,
-}
-
-/// `poa_config.json` の構造体．
-#[derive(serde::Serialize)]
-struct PoaConfigJson {
-    command: &'static str,
-    objective: String,
-    iterations: usize,
-    pool_size: usize,
-    mutation_rate: f64,
-    tournament_size: usize,
-    n_applicants: usize,
-    pool_ratio: f64,
-    max_rounds: usize,
-    seed: u64,
-    fitness_kind: String,
-    use_predictor: bool,
-    full_evals: usize,
-    evals_saved: usize,
-}
-
-// ---------------------------------------------------------------------------
 // 補助
 // ---------------------------------------------------------------------------
 
@@ -418,8 +367,13 @@ fn mock_client() -> srap_simulation::llm::SrapClient {
     wrap_client(backend, PromptCache::in_memory())
 }
 
-/// 1 設定を実行する (`--mock` ならライブ LLM の代わりに scripted mock を使う)．
-fn run_one(cfg: &Config, run_idx: usize, mock: bool) -> Result<SimulationResult, String> {
+/// 1 試行のクライアントと，そのクライアントで実際に回る [`Config`] を組む．
+///
+/// `Run::start` より前にクライアントを組むのは，`llm` ブロックに書く model /
+/// endpoint をクライアント自身から採るためである (名前を推測で書かない)．mock は
+/// in-memory キャッシュで駆動するので `cache_path` を落とす — 旧 `run_one` と
+/// 同じ扱いで，シミュレーションの側は 1 行も変えていない．
+fn build_trial_client(cfg: &Config, mock: bool) -> (Config, SrapClient) {
     if mock {
         let mock_cfg = Config {
             llm: LlmSettings {
@@ -428,13 +382,95 @@ fn run_one(cfg: &Config, run_idx: usize, mock: bool) -> Result<SimulationResult,
             },
             ..cfg.clone()
         };
-        run_with_client(&mock_cfg, mock_client(), run_idx)
+        (mock_cfg, mock_client())
     } else {
-        // run() は run_idx=0 固定なので run_idx を渡すため run_with_client を直接使う．
-        let client = srap_simulation::llm::build_live_client(&cfg.llm)
-            .map_err(|e| format!("LLM クライアント構築に失敗: {e}"))?;
-        run_with_client(cfg, client, run_idx)
+        let client = build_live_client(&cfg.llm)
+            .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"));
+        (cfg.clone(), client)
     }
+}
+
+/// 試行 1 本を子 run として回し，記録する．
+///
+/// `run` と `sweep` で共通．子の subcommand 名だけが違う — `run` の子は
+/// 「1 条件の反復 1 本」，`sweep` の子は「格子のセル 1 つの試行 1 本」で，同じ名前に
+/// すると `runvault path --subcommand` がどちらを返すか分からなくなる．
+fn record_trial(
+    subcommand: &str,
+    results_root: &str,
+    cfg: &Config,
+    mock: bool,
+    seed: u64,
+    replicate_index: usize,
+    lineage: &Lineage,
+) -> SimulationResult {
+    let (cfg, client) = build_trial_client(cfg, mock);
+    let llm = record::llm_block(
+        client.inner().model(),
+        client.inner().endpoint(),
+        cfg.llm.temperature,
+    );
+    let parameters = TrialParameters {
+        condition: ConditionParameters::from_config(&cfg, mock),
+        seed,
+    };
+
+    let mut child = Run::start(
+        RunOptions::new(EXPERIMENT, subcommand)
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(results_root)
+            .parameters(&parameters)
+            .expect("runvault: parameters の組み立てに失敗")
+            .hash_exclude(HASH_EXCLUDE)
+            .seed_pointers(TRIAL_SEED_POINTERS)
+            .master_seed(seed)
+            .replicate_index(replicate_index as u64)
+            .lineage(lineage.clone())
+            .llm(llm)
+            .replication(record::replication_policy()),
+    )
+    .expect("runvault: 子 run の開始に失敗");
+
+    let result = run_with_client(&cfg, client, replicate_index)
+        .unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+
+    record::log_trial(&mut child, &result);
+    record::log_llm_usage(&mut child, &result);
+    child.finish().expect("runvault: 子 run の完了に失敗");
+
+    result
+}
+
+/// LLM キャッシュの置き場を用意する (live のみ; mock は in-memory)．
+fn ensure_cache_dir(cache_path: &str, mock: bool) {
+    if !mock {
+        if let Some(parent) = Path::new(cache_path).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+    }
+}
+
+/// `poa` / `reproduce` の `llm` ブロック．
+///
+/// どちらも適応度評価の中でクライアントを組むので，記録用に 1 本だけ同じ設定で
+/// 組んで model / endpoint を聞く (構築は HTTP を叩かない; live ではキャッシュ
+/// ファイルを読むだけ)．推測で「モデル名は多分これ」と書かないための手順である．
+fn probe_llm_block(mock: bool, cache_path: &str, settings: &LlmSettings) -> Llm {
+    let client = if mock {
+        mock_client()
+    } else {
+        build_live_client(&LlmSettings {
+            cache_path: Some(cache_path.to_string()),
+            ..settings.clone()
+        })
+        .unwrap_or_else(|e| panic!("LLM クライアント構築に失敗: {e}"))
+    };
+    record::llm_block(
+        client.inner().model(),
+        client.inner().endpoint(),
+        settings.temperature,
+    )
 }
 
 /// 文字列ポリシーフラグをパースして [`Policy`] を組み立てる (panic on error)．
@@ -463,13 +499,54 @@ fn cmd_run(args: RunArgs) {
         args.c,
     );
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}", args.output_dir, timestamp);
+    ensure_cache_dir(&args.cache_path, args.mock);
 
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    ensure_output_dir(&output_dir);
+    let runs = args.runs.max(1);
+    let base_seed = args.seed.unwrap_or(42);
+    let base_cfg = Config {
+        n_applicants: args.env.n_applicants,
+        pool_ratio: args.env.pool_ratio,
+        policy,
+        max_rounds: args.env.max_rounds,
+        visible_subset_size: args.env.visible_subset_size,
+        seed: Some(base_seed),
+        llm: LlmSettings {
+            temperature: args.temperature,
+            seed: args.llm_seed,
+            cache_path: if args.mock {
+                None
+            } else {
+                Some(args.cache_path.clone())
+            },
+        },
+    };
+
+    // 親 run: 条件と反復リストを宣言するだけで，シミュレーションは回さない．
+    // 試行ごとの派生シードで駆動されるので単一の master_seed は名乗らない
+    // (base seed は /base_seed と seed_pointers 経由で execution_hash に残る)．
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "run")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&ReplicateGroupParameters {
+                condition: ConditionParameters::from_config(&base_cfg, args.mock),
+                runs,
+                base_seed,
+            })
+            .expect("runvault: parameters の組み立てに失敗")
+            .hash_exclude(HASH_EXCLUDE)
+            .seed_pointers(GROUP_SEED_POINTERS)
+            .sweep_parent()
+            .replication(record::replication_policy()),
+    )
+    .expect("runvault: 親 run の開始に失敗");
+
+    let lineage = Lineage {
+        sweep_id: parent.sweep_id().map(str::to_string),
+        parent_run_uid: Some(parent.run_uid().to_string()),
+        ..Default::default()
+    };
 
     println!("=== Ji et al. (2024) SRAP-Agent 希少資源配分 再現実験 ===");
     println!(
@@ -483,57 +560,37 @@ fn cmd_run(args: RunArgs) {
     );
     println!(
         "env: n_applicants={} pool_ratio={} max_rounds={} | runs={}",
-        args.env.n_applicants, args.env.pool_ratio, args.env.max_rounds, args.runs,
+        args.env.n_applicants, args.env.pool_ratio, args.env.max_rounds, runs,
     );
     println!(
-        "LLM: temp={} llm_seed={} cache={} mock={} | seed: {:?}",
-        args.temperature, args.llm_seed, args.cache_path, args.mock, args.seed
+        "LLM: temp={} llm_seed={} cache={} mock={} | seed: {}",
+        args.temperature, args.llm_seed, args.cache_path, args.mock, base_seed
     );
-    println!("出力先: {output_dir}");
+    println!("出力先: {}", parent.dir().display());
     println!("-------------------------------------------------");
 
-    let base_seed = args.seed.unwrap_or(42);
-    let mut all_metrics = Vec::new();
-    let mut last_result: Option<SimulationResult> = None;
-    let mut last_cfg: Option<Config> = None;
-
-    for run_idx in 0..args.runs.max(1) {
-        let seed = derive_run_seed(base_seed, run_idx);
+    let mut last: Option<SimulationResult> = None;
+    for run_idx in 0..runs {
+        let seed = record::replicate_seed(base_seed, run_idx);
         let cfg = Config {
-            n_applicants: args.env.n_applicants,
-            pool_ratio: args.env.pool_ratio,
-            policy,
-            max_rounds: args.env.max_rounds,
-            visible_subset_size: args.env.visible_subset_size,
             seed: Some(seed),
-            llm: LlmSettings {
-                temperature: args.temperature,
-                seed: args.llm_seed,
-                cache_path: if args.mock {
-                    None
-                } else {
-                    Some(args.cache_path.clone())
-                },
-            },
-            output_dir: output_dir.clone(),
+            ..base_cfg.clone()
         };
-
-        let result =
-            run_one(&cfg, run_idx, args.mock).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
-        all_metrics.extend(result.metrics.clone());
-        last_cfg = Some(cfg);
-        last_result = Some(result);
+        let result = record_trial(
+            "run-replicate",
+            &args.output_dir,
+            &cfg,
+            args.mock,
+            seed,
+            run_idx,
+            &lineage,
+        );
+        last = Some(result);
     }
 
-    // long-format metrics.csv (全 run を結合)．
-    save_metrics(&all_metrics, &output_dir);
+    let dir = parent.finish().expect("runvault: 親 run の完了に失敗");
 
-    if let (Some(result), Some(cfg)) = (&last_result, &last_cfg) {
-        save_llm_meta(result, cfg, &output_dir);
-        // config.json (pretty-print JSON; socsim_results::write_json に委譲)．
-        let path = format!("{output_dir}/config.json");
-        write_json(&cfg.to_run_config_json(), &path).expect("config.json の書き込みに失敗");
-
+    if let Some(result) = &last {
         let m = &result.final_metrics;
         println!(
             "最終ラウンド: {} | 配分人数: {} | SW: {:.2}",
@@ -552,11 +609,11 @@ fn cmd_run(args: RunArgs) {
         );
     }
 
-    // latest シンボリックリンクを再作成する (best-effort; 従来同様エラーは無視)．
-    let _ = refresh_latest_symlink(&args.output_dir, &timestamp);
-    println!("メトリクス → {output_dir}/metrics.csv");
-    println!("LLM メタ   → {output_dir}/llm_meta.json");
-    println!("設定       → {output_dir}/config.json");
+    println!("-------------------------------------------------");
+    println!("親 run   → {}", dir.display());
+    println!(
+        "試行 {runs} 本 → 子 run (subcommand=run-replicate)．metrics.csv がラウンドごとの時系列．"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -577,14 +634,63 @@ fn cmd_sweep(args: SweepArgs) {
         .map(|s| parse_sort_strategy(s).unwrap_or_else(|e| panic!("{e}")))
         .collect();
 
-    let timestamp = timestamp();
-    let sweep_dir = format!("{}/{}_sweep", args.output_dir, timestamp);
-    fs::create_dir_all(&sweep_dir).expect("sweep ディレクトリの作成に失敗");
-    if let Some(parent) = Path::new(&args.cache_path).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
+    ensure_cache_dir(&args.cache_path, args.mock);
+
+    let llm = LlmSettings {
+        temperature: args.temperature,
+        seed: args.llm_seed,
+        cache_path: if args.mock {
+            None
+        } else {
+            Some(args.cache_path.clone())
+        },
+    };
+    // 格子の «環境» 側は全セル共通．資源数だけは pool_ratio から決まるので
+    // ダミーの Config 経由で取る．
+    let env_cfg = Config {
+        n_applicants: args.env.n_applicants,
+        pool_ratio: args.env.pool_ratio,
+        max_rounds: args.env.max_rounds,
+        visible_subset_size: args.env.visible_subset_size,
+        seed: Some(args.seed),
+        llm: llm.clone(),
+        ..Config::default()
+    };
 
     let n_total = entries.len() * subsets.len() * strategies.len() * args.runs;
+
+    // 親 run: 格子の定義そのものを parameters に持つ．個別セルの指標は書かない．
+    let parent = Run::start(
+        RunOptions::new(EXPERIMENT, "sweep")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&SweepGridParameters {
+                entry_conditions: entries.iter().map(|e| e.label().to_string()).collect(),
+                resource_subsets: subsets.iter().map(|r| r.label().to_string()).collect(),
+                queue_strategies: strategies.iter().map(|s| s.label().to_string()).collect(),
+                m: args.queues,
+                k: args.k,
+                c: args.c,
+                env: EnvParameters::from_config(&env_cfg),
+                llm: LlmParameters::from_config(&env_cfg, args.mock),
+                runs: args.runs,
+                base_seed: args.seed,
+            })
+            .expect("runvault: parameters の組み立てに失敗")
+            .hash_exclude(HASH_EXCLUDE)
+            .seed_pointers(GROUP_SEED_POINTERS)
+            .sweep_parent()
+            .replication(record::replication_policy()),
+    )
+    .expect("runvault: 親 run の開始に失敗");
+
+    let lineage = Lineage {
+        sweep_id: parent.sweep_id().map(str::to_string),
+        parent_run_uid: Some(parent.run_uid().to_string()),
+        ..Default::default()
+    };
+
     println!("=== Ji et al. (2024) SRAP-Agent ポリシー因子スイープ ===");
     println!(
         "E: {} 種 × R: {} 種 × S: {} 種 × 試行 {} = {} 実行",
@@ -594,69 +700,47 @@ fn cmd_sweep(args: SweepArgs) {
         args.runs,
         n_total,
     );
-    println!("出力先: {sweep_dir}");
+    println!("出力先: {}", parent.dir().display());
     println!("-----------------------------------------------------------");
 
-    let mut summary_rows: Vec<SweepRow> = Vec::with_capacity(n_total);
-    let mut all_metrics = Vec::new();
+    // セルごとの最終 SW (末尾のサマリ表示に使う)．
+    let mut cell_sw: Vec<(ResourceSubset, f64)> = Vec::with_capacity(n_total);
     let mut done = 0usize;
 
     for &entry in &entries {
         for &subset in &subsets {
             for &strategy in &strategies {
                 for run_idx in 0..args.runs {
-                    let seed = socsim_core::derive_seed(
+                    let seed = record::trial_seed(
                         args.seed,
-                        &[entry as u64, subset as u64, strategy as u64, run_idx as u64],
+                        entry as u64,
+                        subset as u64,
+                        strategy as u64,
+                        run_idx,
                     );
-                    let policy = Policy {
-                        entry_condition: entry,
-                        resource_subset: subset,
-                        sort_strategy: strategy,
-                        m: args.queues,
-                        k: args.k,
-                        c: args.c,
-                    };
                     let cfg = Config {
-                        n_applicants: args.env.n_applicants,
-                        pool_ratio: args.env.pool_ratio,
-                        policy,
-                        max_rounds: args.env.max_rounds,
-                        visible_subset_size: args.env.visible_subset_size,
-                        seed: Some(seed),
-                        llm: LlmSettings {
-                            temperature: args.temperature,
-                            seed: args.llm_seed,
-                            cache_path: if args.mock {
-                                None
-                            } else {
-                                Some(args.cache_path.clone())
-                            },
+                        policy: Policy {
+                            entry_condition: entry,
+                            resource_subset: subset,
+                            sort_strategy: strategy,
+                            m: args.queues,
+                            k: args.k,
+                            c: args.c,
                         },
-                        output_dir: sweep_dir.clone(),
+                        seed: Some(seed),
+                        ..env_cfg.clone()
                     };
 
-                    let result = run_one(&cfg, run_idx, args.mock)
-                        .unwrap_or_else(|e| panic!("実行に失敗: {e}"));
-                    all_metrics.extend(result.metrics.clone());
-                    let m = &result.final_metrics;
-                    summary_rows.push(SweepRow {
-                        entry_condition: entry.label().to_string(),
-                        resource_subset: subset.label().to_string(),
-                        queue_strategy: strategy.label().to_string(),
-                        run: run_idx,
+                    let result = record_trial(
+                        "sweep-point",
+                        &args.output_dir,
+                        &cfg,
+                        args.mock,
                         seed,
-                        final_round: result.final_round,
-                        final_sw: m.sw,
-                        final_avg_rsize: m.avg_rsize,
-                        final_avg_wt: m.avg_wt,
-                        final_var_rsize: m.var_rsize,
-                        final_rop: m.rop,
-                        final_co_gini: m.co_gini,
-                        final_f_vnv: m.f_vnv,
-                        n_allocated: m.n_allocated,
-                        cache_hit_rate: result.metadata.cache_hit_rate(),
-                    });
+                        run_idx,
+                        &lineage,
+                    );
+                    cell_sw.push((subset, result.final_metrics.sw));
                     done += 1;
                 }
                 println!(
@@ -672,53 +756,27 @@ fn cmd_sweep(args: SweepArgs) {
         }
     }
 
-    // sweep_summary.csv (各行を serialize; socsim_results::write_csv に委譲)．
-    {
-        let path = format!("{sweep_dir}/sweep_summary.csv");
-        write_csv(&summary_rows, &path).expect("sweep_summary.csv の書き込みに失敗");
-    }
-    // metrics.csv (long-format, 全 run)．
-    save_metrics(&all_metrics, &sweep_dir);
-    // sweep_config.json
-    {
-        let config_json = SweepConfigJson {
-            command: "sweep",
-            entry_conditions: entries.iter().map(|e| e.label().to_string()).collect(),
-            resource_subsets: subsets.iter().map(|r| r.label().to_string()).collect(),
-            queue_strategies: strategies.iter().map(|s| s.label().to_string()).collect(),
-            n_applicants: args.env.n_applicants,
-            pool_ratio: args.env.pool_ratio,
-            queues: args.queues,
-            k: args.k,
-            c: args.c,
-            max_rounds: args.env.max_rounds,
-            runs: args.runs,
-            seed: args.seed,
-            llm_temperature: args.temperature,
-            llm_seed: args.llm_seed,
-        };
-        let path = format!("{sweep_dir}/sweep_config.json");
-        write_json(&config_json, &path).expect("sweep_config.json の書き込みに失敗");
-    }
-
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{timestamp}_sweep"));
+    let dir = parent.finish().expect("runvault: 親 run の完了に失敗");
 
     println!("===========================================================");
     println!("資源サブセット別の平均 SW (論文: r_size 最高 / r_random 最低):");
     for &subset in &subsets {
-        let rows: Vec<&SweepRow> = summary_rows
+        let values: Vec<f64> = cell_sw
             .iter()
-            .filter(|r| r.resource_subset == subset.label())
+            .filter(|(s, _)| *s == subset)
+            .map(|(_, sw)| *sw)
             .collect();
-        if rows.is_empty() {
+        if values.is_empty() {
             continue;
         }
-        let avg_sw = mean(&rows.iter().map(|r| r.final_sw).collect::<Vec<_>>());
+        let avg_sw = mean(&values);
         println!("  R={:<9} → 平均 SW = {avg_sw:.2}", subset.label());
     }
     println!("-----------------------------------------------------------");
-    println!("サマリ → {sweep_dir}/sweep_summary.csv");
-    println!("設定   → {sweep_dir}/sweep_config.json");
+    println!("親 run   → {}", dir.display());
+    println!(
+        "試行 {n_total} 本 → 子 run (subcommand=sweep-point)．セル座標は子の parameters にある．"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -741,12 +799,61 @@ fn poa_fitness_kind(mock: bool, cache_path: &str) -> FitnessKind {
 
 fn cmd_poa(args: PoaArgs) {
     let objective = parse_objective(&args.objective).unwrap_or_else(|e| panic!("{e}"));
-
-    let timestamp = timestamp();
-    let output_dir = format!("{}/{}_poa", args.output_dir, timestamp);
-    ensure_output_dir(&output_dir);
-
     let fitness_kind = poa_fitness_kind(args.mock, &args.cache_path);
+
+    let llm = LlmSettings {
+        temperature: args.temperature,
+        seed: args.llm_seed,
+        // 適応度評価は FitnessKind が自分でキャッシュを開くので，条件としての
+        // 置き場だけを記録する (mock は in-memory)．
+        cache_path: if args.mock {
+            None
+        } else {
+            Some(args.cache_path.clone())
+        },
+    };
+    let base_config = Config {
+        n_applicants: args.env.n_applicants,
+        pool_ratio: args.env.pool_ratio,
+        max_rounds: args.env.max_rounds,
+        visible_subset_size: args.env.visible_subset_size,
+        seed: Some(args.seed),
+        llm: LlmSettings {
+            temperature: args.temperature,
+            seed: args.llm_seed,
+            cache_path: None,
+        },
+        ..Config::default()
+    };
+    let env_cfg = Config {
+        llm: llm.clone(),
+        ..base_config.clone()
+    };
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "poa")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&PoaParameters {
+                objective: objective.label().to_string(),
+                iterations: args.iterations,
+                pool_size: args.pool_size,
+                mutation_rate: args.mutation_rate,
+                tournament_size: args.tournament_size,
+                use_predictor: args.use_predictor,
+                env: EnvParameters::from_config(&env_cfg),
+                llm: LlmParameters::from_config(&env_cfg, args.mock),
+                seed: args.seed,
+            })
+            .expect("runvault: parameters の組み立てに失敗")
+            .hash_exclude(HASH_EXCLUDE)
+            .seed_pointers(TRIAL_SEED_POINTERS)
+            .master_seed(args.seed)
+            .llm(probe_llm_block(args.mock, &args.cache_path, &llm))
+            .replication(record::replication_poa()),
+    )
+    .expect("runvault: run の開始に失敗");
 
     println!("=== Ji et al. (2024) SRAP-Agent POA (GA + 予測器 f̃) ===");
     println!(
@@ -765,22 +872,9 @@ fn cmd_poa(args: PoaArgs) {
             "無効"
         },
     );
-    println!("出力先: {output_dir}");
+    println!("出力先: {}", rv.dir().display());
     println!("-------------------------------------------------");
 
-    let base_config = Config {
-        n_applicants: args.env.n_applicants,
-        pool_ratio: args.env.pool_ratio,
-        max_rounds: args.env.max_rounds,
-        visible_subset_size: args.env.visible_subset_size,
-        seed: Some(args.seed),
-        llm: LlmSettings {
-            temperature: args.temperature,
-            seed: args.llm_seed,
-            cache_path: None,
-        },
-        ..Config::default()
-    };
     let poa_cfg = PoaConfig {
         objective,
         iterations: args.iterations,
@@ -795,38 +889,21 @@ fn cmd_poa(args: PoaArgs) {
 
     let result = run_poa(&poa_cfg);
 
-    // poa_history.csv (各行を serialize; socsim_results::write_csv に委譲)．
-    {
-        let path = format!("{output_dir}/poa_history.csv");
-        write_csv(&result.history, &path).expect("poa_history.csv の書き込みに失敗");
-    }
-    // poa_config.json
-    {
-        let config_json = PoaConfigJson {
-            command: "poa",
-            objective: objective.label().to_string(),
-            iterations: args.iterations,
-            pool_size: args.pool_size,
-            mutation_rate: args.mutation_rate,
-            tournament_size: args.tournament_size,
-            n_applicants: args.env.n_applicants,
-            pool_ratio: args.env.pool_ratio,
-            max_rounds: args.env.max_rounds,
-            seed: args.seed,
-            fitness_kind: poa_cfg.fitness_kind.label().to_string(),
-            use_predictor: args.use_predictor,
-            full_evals: result.full_evals,
-            evals_saved: result.evals_saved,
-        };
-        let path = format!("{output_dir}/poa_config.json");
-        write_json(&config_json, &path).expect("poa_config.json の書き込みに失敗");
-    }
+    record::log_poa_history(&mut rv, objective.label(), &result.history);
+    record::log_poa_best_policy(&mut rv, objective.label(), &result);
 
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("{timestamp}_poa"));
+    print_poa_result(objective.label(), &result, args.use_predictor);
 
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
+    println!("run → {}", dir.display());
+    println!("世代パネル → events.jsonl (x.ji2024.poa_generation) / π* → x.ji2024.poa_best_policy");
+}
+
+/// POA の結果をコンソールに出す (`poa` / `reproduce` で共通)．
+fn print_poa_result(objective: &str, result: &PoaResult, use_predictor: bool) {
     let best = result.best_policy;
     println!(
-        "最良ポリシー π*: E={} S={} R={} m={} k={} c={}",
+        "最良ポリシー π* ({objective}): E={} S={} R={} m={} k={} c={}",
         best.entry_condition.label(),
         best.sort_strategy.label(),
         best.resource_subset.label(),
@@ -844,7 +921,7 @@ fn cmd_poa(args: PoaArgs) {
         result.best_fitness,
         result.improvement_pct(),
     );
-    if args.use_predictor {
+    if use_predictor {
         println!(
             "評価回数: フル {} 回 | 予測器で省略 {} 回 (候補 {} 件)",
             result.full_evals,
@@ -852,39 +929,11 @@ fn cmd_poa(args: PoaArgs) {
             result.full_evals + result.evals_saved,
         );
     }
-    println!("履歴 → {output_dir}/poa_history.csv");
-    println!("設定 → {output_dir}/poa_config.json");
 }
 
 // ---------------------------------------------------------------------------
 // reproduce — Table 2/3・Fig.4 一括再現
 // ---------------------------------------------------------------------------
-
-/// Table 2 の 1 行 (入室条件 × 資源サブセット の平均 SW)．
-#[derive(serde::Serialize)]
-struct Table2Row {
-    entry_condition: String,
-    resource_subset: String,
-    mean_sw: f64,
-    runs: usize,
-}
-
-/// Table 3 の 1 行 (POA 最適化ポリシー: 満足度志向 / 公平性志向)．
-#[derive(serde::Serialize)]
-struct Table3Row {
-    objective: String,
-    entry_condition: String,
-    sort_strategy: String,
-    resource_subset: String,
-    m: usize,
-    k: usize,
-    c: usize,
-    initial_fitness: f64,
-    final_fitness: f64,
-    improvement_pct: f64,
-    full_evals: usize,
-    evals_saved: usize,
-}
 
 /// PASS / off-anchor の判定文字列を作る．
 fn verdict(ok: bool) -> &'static str {
@@ -895,10 +944,29 @@ fn verdict(ok: bool) -> &'static str {
     }
 }
 
+/// 子 run を作らずに 1 試行を回す (`reproduce` の Table 2 用)．
+///
+/// `reproduce` は «同じ環境で資源サブセットだけを変えた» paired 比較を 1 回の実行の
+/// 中で行い，その勝率を判定に使う．条件を子 run に割ると，起きていない実行を
+/// 主張することになるうえ比較そのものが run をまたぐので，ここでは run を分けない．
+fn run_inline(cfg: &Config, mock: bool, run_idx: usize) -> SimulationResult {
+    let (cfg, client) = build_trial_client(cfg, mock);
+    run_with_client(&cfg, client, run_idx).unwrap_or_else(|e| panic!("実行に失敗: {e}"))
+}
+
+/// Table 3 の 1 行 (コンソール表示と判定に使う; 記録は
+/// `x.ji2024.poa_best_policy` イベントが持つ)．
+struct Table3Row {
+    initial_fitness: f64,
+    final_fitness: f64,
+    evals_saved: usize,
+}
+
 /// reproduce: Table 2 (ポリシー順序の社会的厚生) + Table 3 / Fig.4 (POA 最適化) を
 /// 一括再現する．論文値は GPT-3.5-turbo の合成環境固有なので **絶対値ではなく順序・
 /// 符号** を再現目標とする (設計書 §7)．観測値と論文の知見を PASS / off-anchor で照合し，
-/// `reproduce_summary.json` + Table2/3 CSV + POA 履歴 (Fig.4 用) を書き出す．
+/// 判定は `artifacts/reproduce_summary.json` に，観測そのものは指標と
+/// `events.jsonl` に残す．
 fn cmd_reproduce(args: ReproduceArgs) {
     let mock = args.mock;
     let quick = args.quick;
@@ -918,23 +986,13 @@ fn cmd_reproduce(args: ReproduceArgs) {
         args.max_rounds
     };
 
-    let timestamp = timestamp();
-    let output_dir = format!("{}/reproduce_{}", args.output_dir, timestamp);
-    ensure_output_dir(&output_dir);
-    let fig_dir = format!("{output_dir}/figures");
-    ensure_output_dir(&fig_dir);
+    ensure_cache_dir(&args.cache_path, mock);
 
-    println!("=== Ji et al. (2024) SRAP-Agent 論文 Table 2/3・Fig.4 一括再現 ===");
-    println!(
-        "mode: {} | quick: {} | runs: {} | POA iters: {} pool: {}",
-        if mock { "mock" } else { "live" },
-        quick,
-        runs,
-        poa_iters,
-        poa_pool,
-    );
-    println!("出力先: {output_dir}");
-    println!("-------------------------------------------------");
+    // POA のハイパーパラメータ．旧実装はここで直書きしていたが，どれも結果を
+    // 決める値なので parameters に載せる．
+    const POA_MUTATION_RATE: f64 = 0.2;
+    const POA_TOURNAMENT_SIZE: usize = 3;
+    const POA_USE_PREDICTOR: bool = true;
 
     let base = Config {
         n_applicants,
@@ -949,6 +1007,60 @@ fn cmd_reproduce(args: ReproduceArgs) {
         },
         ..Config::default()
     };
+    let declared_llm = LlmSettings {
+        temperature: args.temperature,
+        seed: args.llm_seed,
+        cache_path: if mock {
+            None
+        } else {
+            Some(args.cache_path.clone())
+        },
+    };
+    let env_cfg = Config {
+        llm: declared_llm.clone(),
+        ..base.clone()
+    };
+
+    let mut rv = Run::start(
+        RunOptions::new(EXPERIMENT, "reproduce")
+            .repo_id(REPO_ID)
+            .domain(DOMAIN)
+            .results_root(&args.output_dir)
+            .parameters(&ReproduceParameters {
+                env: EnvParameters::from_config(&env_cfg),
+                m: args.queues,
+                k: args.k,
+                c: args.c,
+                runs,
+                poa_iterations: poa_iters,
+                poa_pool_size: poa_pool,
+                poa_mutation_rate: POA_MUTATION_RATE,
+                poa_tournament_size: POA_TOURNAMENT_SIZE,
+                poa_use_predictor: POA_USE_PREDICTOR,
+                quick,
+                llm: LlmParameters::from_config(&env_cfg, mock),
+                seed: args.seed,
+            })
+            .expect("runvault: parameters の組み立てに失敗")
+            .hash_exclude(HASH_EXCLUDE)
+            .seed_pointers(TRIAL_SEED_POINTERS)
+            .master_seed(args.seed)
+            .llm(probe_llm_block(mock, &args.cache_path, &declared_llm))
+            .replication(record::replication_all()),
+    )
+    .expect("runvault: run の開始に失敗");
+
+    println!("=== Ji et al. (2024) SRAP-Agent 論文 Table 2/3・Fig.4 一括再現 ===");
+    println!(
+        "mode: {} | quick: {} | runs: {} | POA iters: {} pool: {}",
+        if mock { "mock" } else { "live" },
+        quick,
+        runs,
+        poa_iters,
+        poa_pool,
+    );
+    println!("出力先: {}", rv.dir().display());
+    println!("-------------------------------------------------");
 
     // ── Table 2: 入室条件 × 資源サブセット の SW (FIFO 固定; matched-seed paired) ──
     //
@@ -957,10 +1069,9 @@ fn cmd_reproduce(args: ReproduceArgs) {
     // 順序が崩れやすい (大きい家ほど rent ペナルティが累積する合成効果のため)．そこで
     // 各 (entry, run) の **同一環境** で r_size / r_rent / r_random を比較し，
     // SW(r_size) >= SW(r_random) が成立した環境の **割合 (paired win-rate)** で判定する
-    // (符号ではなく順序が再現目標; 設計書 §7)．各セルの平均 SW は table2 CSV に残す．
+    // (符号ではなく順序が再現目標; 設計書 §7)．各セルの平均 SW はイベントに残す．
     let entries = EntryCondition::all();
     let subsets = ResourceSubset::all();
-    let mut table2: Vec<Table2Row> = Vec::new();
     // (entry,subset) → 各 run の SW 列 (paired 比較用)．
     let mut sw_runs: std::collections::BTreeMap<(EntryCondition, ResourceSubset), Vec<f64>> =
         std::collections::BTreeMap::new();
@@ -972,7 +1083,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
             for run_idx in 0..runs.max(1) {
                 // matched seed: 同一 (entry, run) には resource_subset によらず同じ環境を
                 // 与える (subset を seed に含めない)．
-                let seed = socsim_core::derive_seed(args.seed, &[entry as u64, run_idx as u64]);
+                let seed = record::matched_env_seed(args.seed, entry as u64, run_idx);
                 let cfg = Config {
                     policy: Policy {
                         entry_condition: entry,
@@ -993,16 +1104,10 @@ fn cmd_reproduce(args: ReproduceArgs) {
                     },
                     ..base.clone()
                 };
-                let result =
-                    run_one(&cfg, run_idx, mock).unwrap_or_else(|e| panic!("実行に失敗: {e}"));
+                let result = run_inline(&cfg, mock, run_idx);
                 sws.push(result.final_sw());
             }
-            table2.push(Table2Row {
-                entry_condition: entry.label().to_string(),
-                resource_subset: subset.label().to_string(),
-                mean_sw: mean(&sws),
-                runs,
-            });
+            record::log_table2_cell(&mut rv, entry.label(), subset.label(), mean(&sws), runs);
             sw_runs.insert((entry, subset), sws);
         }
     }
@@ -1027,6 +1132,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
     let (rent_wins, _) = paired_winrate(ResourceSubset::RRent, ResourceSubset::RRandom);
     let size_winrate = size_wins as f64 / n_env as f64;
     let rent_winrate = rent_wins as f64 / n_env as f64;
+    record::log_reproduce_summary(&mut rv, n_env, size_wins, rent_wins);
 
     // headline 条件 (p_select) の平均 SW も表示する (paper の最高 SW 条件)．
     let mean_cell =
@@ -1066,129 +1172,66 @@ fn cmd_reproduce(args: ReproduceArgs) {
     println!("[Table 3 / Fig.4] POA ポリシー最適化 (満足度志向 π_s* / 公平性志向 π_f*):");
     let fitness_kind = poa_fitness_kind(mock, &args.cache_path);
     let mut table3: Vec<Table3Row> = Vec::new();
-    let mut poa_summaries: Vec<(String, srap_simulation::poa::PoaResult)> = Vec::new();
 
     for objective in [Objective::Satisfaction, Objective::Fairness] {
         let poa_cfg = PoaConfig {
             objective,
             iterations: poa_iters,
             pool_size: poa_pool,
-            mutation_rate: 0.2,
-            tournament_size: 3,
+            mutation_rate: POA_MUTATION_RATE,
+            tournament_size: POA_TOURNAMENT_SIZE,
             base_config: base.clone(),
             seed: args.seed,
             fitness_kind: fitness_kind.clone(),
-            use_predictor: true,
+            use_predictor: POA_USE_PREDICTOR,
         };
         let result = run_poa(&poa_cfg);
-        let best = result.best_policy;
-        let initial = result
-            .history
-            .first()
-            .map(|h| h.best_fitness)
-            .unwrap_or(0.0);
-        println!(
-            "  {} π*: E={} S={} R={} m={} k={} c={} | f(π) {:.2} → {:.2} ({:+.1}%) | フル評価 {} 省略 {}",
-            objective.label(),
-            best.entry_condition.label(),
-            best.sort_strategy.label(),
-            best.resource_subset.label(),
-            best.m,
-            best.k,
-            best.c,
-            initial,
-            result.best_fitness,
-            result.improvement_pct(),
-            result.full_evals,
-            result.evals_saved,
-        );
+        let label = objective.label();
+        print_poa_result(label, &result, POA_USE_PREDICTOR);
+
+        record::log_poa_history(&mut rv, label, &result.history);
+        record::log_poa_best_policy(&mut rv, label, &result);
+
         table3.push(Table3Row {
-            objective: objective.label().to_string(),
-            entry_condition: best.entry_condition.label().to_string(),
-            sort_strategy: best.sort_strategy.label().to_string(),
-            resource_subset: best.resource_subset.label().to_string(),
-            m: best.m,
-            k: best.k,
-            c: best.c,
-            initial_fitness: initial,
+            initial_fitness: result
+                .history
+                .first()
+                .map(|h| h.best_fitness)
+                .unwrap_or(0.0),
             final_fitness: result.best_fitness,
-            improvement_pct: result.improvement_pct(),
-            full_evals: result.full_evals,
             evals_saved: result.evals_saved,
         });
-        poa_summaries.push((objective.label().to_string(), result));
     }
 
     // POA が改善 (または据え置き) であること = エリート保存の単調非減少．
     let poa_improves = table3
         .iter()
         .all(|r| r.final_fitness >= r.initial_fitness - 1e-9);
-    // 公平性志向は満足度志向より «公平性指標を重く罰する» f(π) で最適化されるので
-    // 異なる解 (または同等以上の公平性) を選ぶことを期待する (順序サニティ)．
     let predictor_saved: usize = table3.iter().map(|r| r.evals_saved).sum();
+    let overall = order_size_ge_random && poa_improves;
 
-    // ── CSV / JSON 出力 ───────────────────────────────────────────────────────
-    write_csv(&table2, format!("{output_dir}/table2_sw_by_policy.csv"))
-        .expect("table2 CSV の書き込みに失敗");
-    write_csv(
-        &table3,
-        format!("{output_dir}/table3_optimized_policies.csv"),
-    )
-    .expect("table3 CSV の書き込みに失敗");
-    // Fig.4: 各目標の POA 履歴 (世代 × best/mean fitness)．Python が読む．
-    for (label, result) in &poa_summaries {
-        let path = format!("{output_dir}/poa_history_{label}.csv");
-        write_csv(&result.history, &path).expect("poa_history CSV の書き込みに失敗");
-    }
-
+    // ── 判定 (artifacts) ─────────────────────────────────────────────────────
+    //
+    // PASS / off-anchor と «過半数なら成立» の 0.5 はこちらが決めた帯であって，
+    // 論文が印字した数でも観測そのものでもない．指標にも `reference.csv` にも
+    // 置けないので `artifacts/` に残す．観測の実体は run スコープの指標
+    // (`paired_win_rate_*` / `paired_wins_*` / `n_matched_environments`) と
+    // `events.jsonl` (`x.ji2024.table2_cell` / `x.ji2024.poa_best_policy`) にある．
     let summary = serde_json::json!({
         "paper": "Ji et al. (2024) SRAP-Agent (Findings of EMNLP 2024)",
-        "mode": if mock { "mock" } else { "live" },
-        "quick": quick,
-        "config": {
-            "n_applicants": n_applicants,
-            "pool_ratio": args.pool_ratio,
-            "max_rounds": max_rounds,
-            "runs": runs,
-            "poa_iterations": poa_iters,
-            "poa_pool_size": poa_pool,
-            "seed": args.seed,
-        },
-        "table2": {
-            "headline_entry_condition": "p_select",
-            "headline_mean_sw_r_size": sw_rsize,
-            "headline_mean_sw_r_rent": sw_rrent,
-            "headline_mean_sw_r_random": sw_rrandom,
-            "paired_win_rate_rsize_ge_rrandom": size_winrate,
-            "paired_win_rate_rrent_ge_rrandom": rent_winrate,
-            "n_matched_environments": n_env,
-            "best_policy_entry": best_cell.0,
-            "best_policy_subset": best_cell.1,
-            "best_policy_mean_sw": best_cell.2,
-            "checks": {
-                "sw_rsize_ge_rrandom": {
-                    "observed": format!("{}/{} matched envs ({:.0}%)", size_wins, n_env, size_winrate * 100.0),
-                    "paper": "r_size highest, r_random lowest",
-                    "pass": order_size_ge_random,
-                },
-                "sw_rrent_ge_rrandom": {
-                    "observed": format!("{}/{} matched envs ({:.0}%)", rent_wins, n_env, rent_winrate * 100.0),
-                    "paper": "r_rent comparable to r_size, both > r_random",
-                    "pass": order_rent_ge_random,
-                },
-            },
-        },
-        "table3": table3.iter().map(|r| serde_json::json!({
-            "objective": r.objective,
-            "policy": format!("E={} S={} R={} m={} k={} c={}",
-                r.entry_condition, r.sort_strategy, r.resource_subset, r.m, r.k, r.c),
-            "initial_fitness": r.initial_fitness,
-            "final_fitness": r.final_fitness,
-            "improvement_pct": r.improvement_pct,
-            "full_evals": r.full_evals,
-            "evals_saved": r.evals_saved,
-        })).collect::<Vec<_>>(),
         "checks": {
+            "sw_rsize_ge_rrandom": {
+                "observed": format!("{}/{} matched envs ({:.0}%)", size_wins, n_env, size_winrate * 100.0),
+                "paper": "r_size highest, r_random lowest",
+                "threshold": "paired win-rate >= 50% (this implementation's band, not the paper's)",
+                "pass": order_size_ge_random,
+            },
+            "sw_rrent_ge_rrandom": {
+                "observed": format!("{}/{} matched envs ({:.0}%)", rent_wins, n_env, rent_winrate * 100.0),
+                "paper": "r_rent comparable to r_size, both > r_random",
+                "threshold": "paired win-rate >= 50% (this implementation's band, not the paper's)",
+                "pass": order_rent_ge_random,
+            },
             "poa_improves_or_holds": {
                 "observed": poa_improves,
                 "paper": "POA-optimized policy fitness >= baseline (elitism, Fig.4 trend)",
@@ -1202,21 +1245,36 @@ fn cmd_reproduce(args: ReproduceArgs) {
         },
         // 論文の核心知見 = «r_size 最高 / r_random 最低» (r_rent は副次; 論文も r_rent
         // ≈ r_size と述べるが合成 rent ペナルティで揺れうる) + POA が厚生を改善．
-        "overall_pass": order_size_ge_random && poa_improves,
+        "overall_pass": overall,
     });
-    write_json(&summary, format!("{output_dir}/reproduce_summary.json"))
-        .expect("reproduce_summary.json の書き込みに失敗");
+    let artifacts = rv.dir().join("artifacts");
+    fs::create_dir_all(&artifacts).expect("artifacts ディレクトリの作成に失敗");
+    let summary_path = artifacts.join("reproduce_summary.json");
+    fs::write(
+        &summary_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&summary).expect("判定の JSON 化に失敗")
+        ),
+    )
+    .expect("reproduce_summary.json の書き込みに失敗");
 
-    let _ = refresh_latest_symlink(&args.output_dir, &format!("reproduce_{timestamp}"));
+    let dir = rv.finish().expect("runvault: run の完了に失敗");
 
-    let overall = order_size_ge_random && poa_improves;
     println!("-------------------------------------------------");
     println!("総合判定: {}", verdict(overall));
-    println!("Table 2  → {output_dir}/table2_sw_by_policy.csv");
-    println!("Table 3  → {output_dir}/table3_optimized_policies.csv");
-    println!("Fig.4    → {output_dir}/poa_history_*.csv");
-    println!("サマリ   → {output_dir}/reproduce_summary.json");
-    println!("図の生成 → uv run srap-tools reproduce --results-dir {output_dir}");
+    println!("run     → {}", dir.display());
+    println!("Table 2 → events.jsonl (x.ji2024.table2_cell)");
+    println!("Table 3 → events.jsonl (x.ji2024.poa_best_policy)");
+    println!("Fig.4   → events.jsonl (x.ji2024.poa_generation)");
+    println!(
+        "判定    → {}",
+        dir.join("artifacts/reproduce_summary.json").display()
+    );
+    println!(
+        "図の生成 → uv run srap-tools reproduce --results-dir {}",
+        dir.display()
+    );
 }
 
 // ---------------------------------------------------------------------------

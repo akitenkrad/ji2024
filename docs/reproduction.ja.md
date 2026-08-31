@@ -39,10 +39,10 @@ SW(`r_size`) > SW(`r_random`) が成り立つ — 論文の核心知見 (面積�
 
 ```bash
 cargo run --release -- reproduce --mock --seed 42      # 高速スモークは --quick
-uv run srap-tools reproduce --results-dir results/latest   # 図を生成
+uv run srap-tools reproduce   # 図を生成
 ```
 
-`reproduce` は Table 2 を **matched-seed paired** 比較 (同一環境で資源サブセットのみを変える) として実行し，SW(`r_size`) ≥ SW(`r_random`) が成立した環境の割合 (paired win-rate) を報告する — 合成 rent ペナルティで per-environment の SW がノイジーなため，独立シードの平均比較より paired win-rate の方が頑健である．続けて両目標で POA を実行し (Table 3 `π_s*` / `π_f*`)，目標別の収束履歴 (Fig.4) を出力する．PASS 基準は論文の核心知見 (`r_size` 最高 / `r_random` 最低) + POA の非減少トレンドで，`reproduce_summary.json` がチェックごとに観測 vs 論文知見を記録する．
+`reproduce` は Table 2 を **matched-seed paired** 比較 (同一環境で資源サブセットのみを変える) として実行し，SW(`r_size`) ≥ SW(`r_random`) が成立した環境の割合 (paired win-rate) を報告する — 合成 rent ペナルティで per-environment の SW がノイジーなため，独立シードの平均比較より paired win-rate の方が頑健である．続けて両目標で POA を実行し (Table 3 `π_s*` / `π_f*`)，目標別の収束履歴 (Fig.4) を出力する．PASS 基準は論文の核心知見 (`r_size` 最高 / `r_random` 最低) + POA の非減少トレンドで，`artifacts/reproduce_summary.json` がチェックごとに観測 vs 論文知見を記録する (win-rate の帯はこちらが決めたものなので，指標でも論文の報告値でもない)．
 
 ## 実 Ollama スモーク (メインセッション用)
 
