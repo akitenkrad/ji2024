@@ -38,6 +38,23 @@ pub type SharedMetadata = Rc<RefCell<MetadataCollector>>;
 /// 共有メトリクス行バッファ (metrics.csv; long-format)．
 pub type SharedMetrics = Rc<RefCell<Vec<MetricRow>>>;
 
+/// Bumped once for every applicant [`ApplyDecision`] considers.
+///
+/// The applicant's decision — not the round — is where the time goes: a round
+/// asks every active applicant which visible resource to apply for, and each of
+/// those is a model call. Measured live at 40 applicants, a whole run was **one
+/// round of 2m29s**, so a per-round count would have sat at zero for all of it.
+///
+/// Shared rather than borrowed because a mechanism goes into the engine as a
+/// `Box<dyn Mechanism<_>>`, which is `'static` and so cannot hold a borrow of
+/// the caller's counter.
+pub type DecisionObserver = Rc<RefCell<dyn FnMut()>>;
+
+/// An observer that counts nothing, for callers that do not report progress.
+pub fn no_observer() -> DecisionObserver {
+    Rc::new(RefCell::new(|| {}))
+}
+
 /// scratch blackboard に当該ラウンドの応募者希望を渡すキー．
 const SCRATCH_DESIRES: &str = "desires";
 
@@ -139,6 +156,7 @@ pub struct ApplyDecision {
     metadata: SharedMetadata,
     settings: LlmSettings,
     visible_subset_size: usize,
+    observer: DecisionObserver,
 }
 
 impl ApplyDecision {
@@ -147,12 +165,14 @@ impl ApplyDecision {
         metadata: SharedMetadata,
         settings: LlmSettings,
         visible_subset_size: usize,
+        observer: DecisionObserver,
     ) -> Self {
         ApplyDecision {
             client,
             metadata,
             settings,
             visible_subset_size,
+            observer,
         }
     }
 }
@@ -175,6 +195,9 @@ impl Mechanism<SrapWorld> for ApplyDecision {
 
         let mut desires: Desires = Vec::with_capacity(active.len());
         for id in active {
+            // 数えるのは «検討した応募者»．可視資源が無くてモデルを呼ばずに
+            // 離脱する分も数える — 数えているのは試みた仕事である．
+            (self.observer.borrow_mut())();
             // 可視資源サブセット V(p_j): 上位 visible_subset_size 件 (参照を集める)．
             let take = self.visible_subset_size.min(visible_ids.len());
             let visible_refs: Vec<&crate::world::Resource> = visible_ids

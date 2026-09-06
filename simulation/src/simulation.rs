@@ -30,8 +30,8 @@ use socsim_llm::MetadataCollector;
 use crate::config::Config;
 use crate::llm::{build_live_client, SrapClient};
 use crate::mechanisms::{
-    AllocationRule, ApplyDecision, EvaluateWelfare, PolicySetup, SharedClient, SharedMetadata,
-    SharedMetrics, UpdateMemory,
+    no_observer, AllocationRule, ApplyDecision, DecisionObserver, EvaluateWelfare, PolicySetup,
+    SharedClient, SharedMetadata, SharedMetrics, UpdateMemory,
 };
 use crate::metrics::{MetricRow, SrapMetrics};
 use crate::world::{Applicant, Memory, Preferences, Resource, SrapWorld};
@@ -144,6 +144,24 @@ pub fn run_with_client(
     client: SrapClient,
     run_idx: usize,
 ) -> std::result::Result<SimulationResult, String> {
+    run_with_client_observed(cfg, client, run_idx, no_observer())
+}
+
+/// The same, bumping `observer` once for every applicant asked to decide.
+///
+/// The observer is where a caller counts its progress. **The applicant's
+/// decision is the unit, not the round**, because that is where the time goes:
+/// a round asks every active applicant which of the visible resources to apply
+/// for, and each of those is a model call. The rounds are few and often one —
+/// `UpdateMemory` stops the run as soon as the pool is exhausted or everyone
+/// has left, and a live run of 40 applicants was measured as a single round
+/// lasting 2m29s. A per-round count would have stayed at zero for all of it.
+pub fn run_with_client_observed(
+    cfg: &Config,
+    client: SrapClient,
+    run_idx: usize,
+    observer: DecisionObserver,
+) -> std::result::Result<SimulationResult, String> {
     let root = cfg.seed.unwrap_or_else(rand::random);
 
     let mut init_rng = SimRng::from_seed(derive_seed(root, &[RNG_WORLD_INIT]));
@@ -165,6 +183,7 @@ pub fn run_with_client(
             Rc::clone(&shared_meta),
             cfg.llm.clone(),
             cfg.visible_subset_size,
+            observer,
         )))
         .add_mechanism(Box::new(AllocationRule))
         .add_mechanism(Box::new(EvaluateWelfare::new(

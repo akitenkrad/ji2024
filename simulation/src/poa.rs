@@ -475,9 +475,11 @@ fn evaluate_population(
     prune_margin: f64,
     full_evals: &mut usize,
     evals_saved: &mut usize,
+    on_eval: &mut dyn FnMut(),
 ) -> Vec<f64> {
     let mut out = Vec::with_capacity(pop.len());
     for &p in pop {
+        on_eval();
         let pred = if use_predictor {
             predictor.predict(p)
         } else {
@@ -510,6 +512,30 @@ fn evaluate_population(
 /// 世代をまたいで **単調非減少** になる (テストで検証)．予測器 f̃ を使う場合，劣る
 /// 見込みの個体のフル評価を省略して評価回数を削減する．
 pub fn run_poa(poa: &PoaConfig) -> PoaResult {
+    run_poa_observed(poa, |_| {})
+}
+
+/// The same, calling `on_evaluation` once for every individual considered.
+///
+/// The callback is where a caller counts its progress. One individual is the
+/// unit because it is the unit the cost is in: evaluating a policy runs a whole
+/// simulation, which on the live path is one model call per applicant per
+/// round. A generation would be `pool_size` of those in a single tick.
+///
+/// The count is exact and known before the run: the initial population is
+/// evaluated once and then every generation once, so it is
+/// `pool_size * (1 + iterations)`. Individuals the predictor prunes are counted
+/// too — the count is of the work *considered*, and pruning only makes the run
+/// finish sooner than the estimate, never later.
+///
+/// It is given the running tally rather than nothing so a caller can report
+/// against the population rather than against its own count.
+pub fn run_poa_observed(poa: &PoaConfig, mut on_evaluation: impl FnMut(usize)) -> PoaResult {
+    let mut evaluated = 0usize;
+    let mut on_eval = move || {
+        evaluated += 1;
+        on_evaluation(evaluated);
+    };
     let mut rng = SimRng::from_seed(derive_seed(poa.seed, &[2]));
 
     let pool_size = poa.pool_size.max(2);
@@ -532,6 +558,7 @@ pub fn run_poa(poa: &PoaConfig) -> PoaResult {
         0.0,
         &mut full_evals,
         &mut evals_saved,
+        &mut on_eval,
     );
     let prune_margin = estimate_margin(&initial_fitness);
 
@@ -585,6 +612,7 @@ pub fn run_poa(poa: &PoaConfig) -> PoaResult {
             prune_margin,
             &mut full_evals,
             &mut evals_saved,
+            &mut on_eval,
         );
         // エリート (index 0) は前世代の best をコピーしているが，予測器枝刈りで実評価を
         // 省略されると代理適応度になりうる．best_fitness はエリートの真値を保持する．

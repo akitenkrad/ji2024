@@ -15,18 +15,21 @@
 //! 自前の書き出しはすべて `crate::record` 経由の記録に置き換わっている．
 //! 何をどこへ置いたかは `record` のモジュール docs を参照．
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
+use std::rc::Rc;
 
 use clap::{Parser, Subcommand};
-use runvault::{Lineage, Llm, Run, RunOptions};
+use runvault::{Lineage, Llm, Run, RunOptions, Stage};
 
 use socsim_llm::mock::ScriptedClient;
 use socsim_llm::{LlmClient, PromptCache};
 use srap_simulation::config::{Config, LlmSettings};
 use srap_simulation::llm::{build_live_client, wrap_client, SrapClient};
+use srap_simulation::mechanisms::DecisionObserver;
 use srap_simulation::metrics::{parse_objective, Objective};
-use srap_simulation::poa::{run_poa, FitnessKind, PoaConfig, PoaResult};
+use srap_simulation::poa::{run_poa_observed, FitnessKind, PoaConfig, PoaResult};
 use srap_simulation::policy::{
     parse_entry_condition, parse_resource_subset, parse_sort_strategy, EntryCondition, Policy,
     ResourceSubset, SortStrategy,
@@ -36,7 +39,7 @@ use srap_simulation::record::{
     ReplicateGroupParameters, ReproduceParameters, SweepGridParameters, TrialParameters, DOMAIN,
     EXPERIMENT, GROUP_SEED_POINTERS, HASH_EXCLUDE, REPO_ID, TRIAL_SEED_POINTERS,
 };
-use srap_simulation::simulation::{run_with_client, SimulationResult};
+use srap_simulation::simulation::{run_with_client_observed, SimulationResult};
 
 // ---------------------------------------------------------------------------
 // CLI 定義
@@ -395,6 +398,7 @@ fn build_trial_client(cfg: &Config, mock: bool) -> (Config, SrapClient) {
 /// `run` と `sweep` で共通．子の subcommand 名だけが違う — `run` の子は
 /// 「1 条件の反復 1 本」，`sweep` の子は「格子のセル 1 つの試行 1 本」で，同じ名前に
 /// すると `runvault path --subcommand` がどちらを返すか分からなくなる．
+#[allow(clippy::too_many_arguments)]
 fn record_trial(
     subcommand: &str,
     results_root: &str,
@@ -403,6 +407,7 @@ fn record_trial(
     seed: u64,
     replicate_index: usize,
     lineage: &Lineage,
+    observer: DecisionObserver,
 ) -> SimulationResult {
     let (cfg, client) = build_trial_client(cfg, mock);
     let llm = record::llm_block(
@@ -432,7 +437,7 @@ fn record_trial(
     )
     .expect("runvault: 子 run の開始に失敗");
 
-    let result = run_with_client(&cfg, client, replicate_index)
+    let result = run_with_client_observed(&cfg, client, replicate_index, observer)
         .unwrap_or_else(|e| panic!("実行に失敗: {e}"));
 
     record::log_trial(&mut child, &result);
@@ -440,6 +445,35 @@ fn record_trial(
     child.finish().expect("runvault: 子 run の完了に失敗");
 
     result
+}
+
+/// 応募者の決定を数える stage を，複数の試行から突ける形にして渡す．
+///
+/// 決定を数える場所は `ApplyDecision` の中である．メカニズムはエンジンへ
+/// `Box<dyn Mechanism<_>>` として入るので `'static` であり，呼び出し側の
+/// `Stage` を借用できない — そこで `Rc` で共有し，走り終えたあとに
+/// [`close_shared`] で取り出して閉じる．
+fn share_stage(stage: Stage) -> (Rc<RefCell<Option<Stage>>>, DecisionObserver) {
+    let cell = Rc::new(RefCell::new(Some(stage)));
+    let observer: DecisionObserver = {
+        let cell = Rc::clone(&cell);
+        Rc::new(RefCell::new(move || {
+            if let Some(stage) = cell.borrow_mut().as_mut() {
+                stage.tick();
+            }
+        }))
+    };
+    (cell, observer)
+}
+
+/// 共有していた stage を取り出して閉じる．
+///
+/// manifest.csv は `finish()` で封をされる．その後に 1 行足せば，manifest が
+/// 食い違うダイジェストを持つことになる．
+fn close_shared(cell: &Rc<RefCell<Option<Stage>>>) {
+    if let Some(stage) = cell.borrow_mut().take() {
+        stage.close();
+    }
 }
 
 /// LLM キャッシュの置き場を用意する (live のみ; mock は in-memory)．
@@ -569,6 +603,17 @@ fn cmd_run(args: RunArgs) {
     println!("出力先: {}", parent.dir().display());
     println!("-------------------------------------------------");
 
+    // 進捗の 1 単位は «応募者 1 人の決定»．費用がそこにあり，1 人ずつに
+    // «見えている資源のどれに申し込むか» を尋ねるのがモデル呼び出しである．
+    //
+    // ラウンドは単位にならない．`UpdateMemory` は資源が枯渇するか全員が退出した
+    // 時点で `request_stop()` するので，ライブで 40 人・pool_ratio 0.9 の 1 本を
+    // 測ると **2m29s まるごとが 1 ラウンド** だった．ラウンドを数えていたら
+    // その 2 分半ずっと 0 のままである．
+    //
+    // 分母は持たない．ラウンド数も，各ラウンドで列に残っている人数も，走らせる
+    // まで分からない．
+    let (stage, observer) = share_stage(parent.unbounded_stage("decisions"));
     let mut last: Option<SimulationResult> = None;
     for run_idx in 0..runs {
         let seed = record::replicate_seed(base_seed, run_idx);
@@ -584,9 +629,11 @@ fn cmd_run(args: RunArgs) {
             seed,
             run_idx,
             &lineage,
+            Rc::clone(&observer),
         );
         last = Some(result);
     }
+    close_shared(&stage);
 
     let dir = parent.finish().expect("runvault: 親 run の完了に失敗");
 
@@ -707,6 +754,13 @@ fn cmd_sweep(args: SweepArgs) {
     let mut cell_sw: Vec<(ResourceSubset, f64)> = Vec::with_capacity(n_total);
     let mut done = 0usize;
 
+    // 掃引全体で stage を 1 つ．入室条件ごとに開け直すと小さな tally が 3 つ並ぶ
+    // だけで，掃引全体の進み方が読めなくなる．どこで資源が尽きて止まるかは入室
+    // 条件で決まるため 1 試行あたりの決定回数は条件で変わるが，stage は分母を
+    // 持たないので守るべき割合も見積もりも無く，分ける理由にならない．
+    // 単位は run と同じ «応募者 1 人の決定»．
+    let (stage, observer) = share_stage(parent.unbounded_stage("decisions"));
+
     for &entry in &entries {
         for &subset in &subsets {
             for &strategy in &strategies {
@@ -739,6 +793,7 @@ fn cmd_sweep(args: SweepArgs) {
                         seed,
                         run_idx,
                         &lineage,
+                        Rc::clone(&observer),
                     );
                     cell_sw.push((subset, result.final_metrics.sw));
                     done += 1;
@@ -755,6 +810,8 @@ fn cmd_sweep(args: SweepArgs) {
             }
         }
     }
+
+    close_shared(&stage);
 
     let dir = parent.finish().expect("runvault: 親 run の完了に失敗");
 
@@ -887,7 +944,23 @@ fn cmd_poa(args: PoaArgs) {
         use_predictor: args.use_predictor,
     };
 
-    let result = run_poa(&poa_cfg);
+    // 進捗の 1 単位は «個体 1 つを検討したこと»．費用がそこにあり，1 個体の
+    // 適応度評価はシミュレーション 1 本まるごと (ライブなら応募者 × ラウンドの
+    // モデル呼び出し) である．世代を単位にすると 1 tick が pool_size 本の
+    // シミュレーションになる．
+    //
+    // 分母は正確に分かる — 初期個体群を 1 回，そのあと世代ごとに 1 回評価するので
+    // `pool_size * (1 + iterations)` になる．予測器に枝刈りされた個体も数える
+    // (数えているのは «検討した仕事») ので，枝刈りは見積もりより早く終わる方向に
+    // しか外れない．
+    let mut stage = rv.stage(
+        "evaluations",
+        poa_cfg.pool_size.max(2) * (1 + poa_cfg.iterations.max(1)),
+    );
+    let result = run_poa_observed(&poa_cfg, |_| stage.tick());
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     record::log_poa_history(&mut rv, objective.label(), &result.history);
     record::log_poa_best_policy(&mut rv, objective.label(), &result);
@@ -949,9 +1022,15 @@ fn verdict(ok: bool) -> &'static str {
 /// `reproduce` は «同じ環境で資源サブセットだけを変えた» paired 比較を 1 回の実行の
 /// 中で行い，その勝率を判定に使う．条件を子 run に割ると，起きていない実行を
 /// 主張することになるうえ比較そのものが run をまたぐので，ここでは run を分けない．
-fn run_inline(cfg: &Config, mock: bool, run_idx: usize) -> SimulationResult {
+fn run_inline(
+    cfg: &Config,
+    mock: bool,
+    run_idx: usize,
+    observer: DecisionObserver,
+) -> SimulationResult {
     let (cfg, client) = build_trial_client(cfg, mock);
-    run_with_client(&cfg, client, run_idx).unwrap_or_else(|e| panic!("実行に失敗: {e}"))
+    run_with_client_observed(&cfg, client, run_idx, observer)
+        .unwrap_or_else(|e| panic!("実行に失敗: {e}"))
 }
 
 /// Table 3 の 1 行 (コンソール表示と判定に使う; 記録は
@@ -1076,7 +1155,11 @@ fn cmd_reproduce(args: ReproduceArgs) {
     let mut sw_runs: std::collections::BTreeMap<(EntryCondition, ResourceSubset), Vec<f64>> =
         std::collections::BTreeMap::new();
 
+    // Table 2 の stage．単位は run / sweep と同じ «応募者 1 人の決定» で，分母を
+    // 持たない理由も同じ．Table 3 の POA とは 1 tick の意味も費用も違うので，
+    // 同じ stage には混ぜない．
     println!("[Table 2] ポリシー順序サニティ (matched-seed paired; FIFO 固定):");
+    let (stage, observer) = share_stage(rv.unbounded_stage("table2"));
     for &entry in &entries {
         for &subset in &subsets {
             let mut sws = Vec::with_capacity(runs);
@@ -1104,13 +1187,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
                     },
                     ..base.clone()
                 };
-                let result = run_inline(&cfg, mock, run_idx);
+                let result = run_inline(&cfg, mock, run_idx, Rc::clone(&observer));
                 sws.push(result.final_sw());
             }
             record::log_table2_cell(&mut rv, entry.label(), subset.label(), mean(&sws), runs);
             sw_runs.insert((entry, subset), sws);
         }
     }
+    close_shared(&stage);
 
     // paired win-rate: 全 (entry, run) 環境のうち SW(r_size) >= SW(r_random) の割合．
     let paired_winrate = |a: ResourceSubset, b: ResourceSubset| -> (usize, usize) {
@@ -1173,6 +1257,11 @@ fn cmd_reproduce(args: ReproduceArgs) {
     let fitness_kind = poa_fitness_kind(mock, &args.cache_path);
     let mut table3: Vec<Table3Row> = Vec::new();
 
+    // 2 目標を通して stage は 1 つ．満足度も公平性も同じ pool_size・同じ世代数を
+    // 回すので 1 tick の費用は揃っており，目標ごとに開け直すと小さな 100% が
+    // 2 つ並ぶだけになる．分母は目標 1 つぶんの 2 倍で，これも正確に分かる．
+    let mut stage = rv.stage("evaluations", 2 * poa_pool.max(2) * (1 + poa_iters.max(1)));
+
     for objective in [Objective::Satisfaction, Objective::Fairness] {
         let poa_cfg = PoaConfig {
             objective,
@@ -1185,7 +1274,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
             fitness_kind: fitness_kind.clone(),
             use_predictor: POA_USE_PREDICTOR,
         };
-        let result = run_poa(&poa_cfg);
+        let result = run_poa_observed(&poa_cfg, |_| stage.tick());
         let label = objective.label();
         print_poa_result(label, &result, POA_USE_PREDICTOR);
 
@@ -1202,6 +1291,10 @@ fn cmd_reproduce(args: ReproduceArgs) {
             evals_saved: result.evals_saved,
         });
     }
+
+    // manifest.csv は finish() で封をされる．その後に 1 行足せば，manifest が
+    // 食い違うダイジェストを持つことになる．
+    stage.close();
 
     // POA が改善 (または据え置き) であること = エリート保存の単調非減少．
     let poa_improves = table3
