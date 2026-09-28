@@ -1,3 +1,113 @@
-# Metric descriptions are not written yet (MYTASK-3382). Until they are,
-# runvault records undeclared metrics instead of refusing them.
-require_docs = false
+# 指標が何を測っているか (runvault の宣言．rs-runvault docs/metrics.ja.md)．
+#
+# 名前は `simulation/src/record.rs` が記録するものと一致していなければならない．
+#
+# `direction` は «値が大きいほど良いか»．模型の状態や到達量は成績ではないので
+# `none` とし，再現精度やキャッシュ効率のように評価方向が定まる量だけ `up` /
+# `down` とする．
+
+[metrics."sw"]
+meaning   = "配分済み応募者の効用の総和 (社会厚生)"
+unit      = "utility"
+direction = "none"
+scope     = ["run"]
+
+[metrics."avg_rsize"]
+meaning   = "配分された資源の面積の平均"
+unit      = "area"
+direction = "none"
+scope     = ["run"]
+
+[metrics."avg_wt"]
+meaning   = "全応募者の待機ラウンド数の平均"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."var_rsize"]
+meaning   = "配分された資源面積の母分散"
+unit      = "area_squared"
+direction = "none"
+scope     = ["run"]
+
+[metrics."rop"]
+meaning   = "脆弱応募者と非脆弱応募者の割当順が逆転している組の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."co_gini"]
+meaning   = "配分された資源面積の Gini 係数"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."f_vnv"]
+meaning   = "非脆弱応募者の平均効用から脆弱応募者の平均効用を引いた差"
+unit      = "utility"
+direction = "none"
+scope     = ["run"]
+
+[metrics."n_allocated"]
+meaning   = "資源を配分された応募者数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."final_round"]
+meaning   = "シミュレーションが停止したラウンド数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_calls"]
+meaning   = "この run が行った LLM の呼び出し回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hits"]
+meaning   = "そのうちキャッシュで済んだ回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."llm_cache_hit_rate"]
+meaning   = "LLM 呼び出しのうちキャッシュで済んだ割合"
+unit      = "ratio"
+direction = "up"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."n_matched_environments"]
+meaning   = "配分方策を対応比較した合成環境の数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_wins_rsize_ge_rrandom"]
+meaning   = "同じ環境で r_size の社会厚生が r_random 以上だった回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_wins_rrent_ge_rrandom"]
+meaning   = "同じ環境で r_rent の社会厚生が r_random 以上だった回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_win_rate_rsize_ge_rrandom"]
+meaning   = "対応比較した環境のうち r_size の社会厚生が r_random 以上だった割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."paired_win_rate_rrent_ge_rrandom"]
+meaning   = "対応比較した環境のうち r_rent の社会厚生が r_random 以上だった割合"
+unit      = "ratio"
+direction = "none"
+range     = [0.0, 1.0]
+scope     = ["run"]
