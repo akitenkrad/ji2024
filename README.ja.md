@@ -93,6 +93,11 @@ cargo run --release -- reproduce --mock --seed 42        # 高速スモークは
 uv run srap-tools reproduce
 ```
 
+
+## Scratch run
+
+開発中・デバッグ中・動作確認の実行には `--scratch` を付ける．run は `results/_scratch/` に作られ，同期されない．最新の scratch run は `runvault path --scratch` で取得できる．
+
 ## テストと Lint
 
 ```bash

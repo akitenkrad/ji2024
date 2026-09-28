@@ -53,6 +53,9 @@ use srap_simulation::simulation::{run_with_client_observed, SimulationResult};
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+    /// Development run: write it under results/_scratch/ so it is never synced to the vault.
+    #[arg(long, global = true)]
+    scratch: bool,
 
     /// Ollama 接続先 URL（指定時は環境変数 OLLAMA_HOST を上書きする）．
     #[arg(long, global = true)]
@@ -408,6 +411,7 @@ fn record_trial(
     replicate_index: usize,
     lineage: &Lineage,
     observer: DecisionObserver,
+    scratch: bool,
 ) -> SimulationResult {
     let (cfg, client) = build_trial_client(cfg, mock);
     let llm = record::llm_block(
@@ -422,6 +426,7 @@ fn record_trial(
 
     let mut child = Run::start(
         RunOptions::new(EXPERIMENT, subcommand)
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(results_root)
@@ -523,7 +528,7 @@ fn build_policy(entry: &str, subset: &str, strategy: &str, m: usize, k: usize, c
 // run
 // ---------------------------------------------------------------------------
 
-fn cmd_run(args: RunArgs) {
+fn cmd_run(args: RunArgs, scratch: bool) {
     let policy = build_policy(
         &args.entry_condition,
         &args.resource_subset,
@@ -560,6 +565,7 @@ fn cmd_run(args: RunArgs) {
     // (base seed は /base_seed と seed_pointers 経由で execution_hash に残る)．
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "run")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -630,6 +636,7 @@ fn cmd_run(args: RunArgs) {
             run_idx,
             &lineage,
             Rc::clone(&observer),
+            scratch,
         );
         last = Some(result);
     }
@@ -667,7 +674,7 @@ fn cmd_run(args: RunArgs) {
 // sweep
 // ---------------------------------------------------------------------------
 
-fn cmd_sweep(args: SweepArgs) {
+fn cmd_sweep(args: SweepArgs, scratch: bool) {
     let entries: Vec<EntryCondition> = split_csv(&args.entry_conditions)
         .iter()
         .map(|s| parse_entry_condition(s).unwrap_or_else(|e| panic!("{e}")))
@@ -709,6 +716,7 @@ fn cmd_sweep(args: SweepArgs) {
     // 親 run: 格子の定義そのものを parameters に持つ．個別セルの指標は書かない．
     let parent = Run::start(
         RunOptions::new(EXPERIMENT, "sweep")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -794,6 +802,7 @@ fn cmd_sweep(args: SweepArgs) {
                         run_idx,
                         &lineage,
                         Rc::clone(&observer),
+                        scratch,
                     );
                     cell_sw.push((subset, result.final_metrics.sw));
                     done += 1;
@@ -854,7 +863,7 @@ fn poa_fitness_kind(mock: bool, cache_path: &str) -> FitnessKind {
     }
 }
 
-fn cmd_poa(args: PoaArgs) {
+fn cmd_poa(args: PoaArgs, scratch: bool) {
     let objective = parse_objective(&args.objective).unwrap_or_else(|e| panic!("{e}"));
     let fitness_kind = poa_fitness_kind(args.mock, &args.cache_path);
 
@@ -889,6 +898,7 @@ fn cmd_poa(args: PoaArgs) {
 
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "poa")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1046,7 +1056,7 @@ struct Table3Row {
 /// 符号** を再現目標とする (設計書 §7)．観測値と論文の知見を PASS / off-anchor で照合し，
 /// 判定は `artifacts/reproduce_summary.json` に，観測そのものは指標と
 /// `events.jsonl` に残す．
-fn cmd_reproduce(args: ReproduceArgs) {
+fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let mock = args.mock;
     let quick = args.quick;
     // quick は POA 世代数・個体群と応募者数を縮小して高速化する．Table 2 の paired
@@ -1102,6 +1112,7 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
     let mut rv = Run::start(
         RunOptions::new(EXPERIMENT, "reproduce")
+            .scratch(scratch)
             .repo_id(REPO_ID)
             .domain(DOMAIN)
             .results_root(&args.output_dir)
@@ -1376,13 +1387,14 @@ fn cmd_reproduce(args: ReproduceArgs) {
 
 fn main() {
     let cli = Cli::parse();
+    let scratch = cli.scratch;
     if let Some(host) = cli.ollama_host.as_deref() {
         std::env::set_var("OLLAMA_HOST", host);
     }
     match cli.command {
-        Commands::Run(args) => cmd_run(args),
-        Commands::Sweep(args) => cmd_sweep(args),
-        Commands::Poa(args) => cmd_poa(args),
-        Commands::Reproduce(args) => cmd_reproduce(args),
+        Commands::Run(args) => cmd_run(args, scratch),
+        Commands::Sweep(args) => cmd_sweep(args, scratch),
+        Commands::Poa(args) => cmd_poa(args, scratch),
+        Commands::Reproduce(args) => cmd_reproduce(args, scratch),
     }
 }
