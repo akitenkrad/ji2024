@@ -550,6 +550,7 @@ fn cmd_run(args: RunArgs, scratch: bool) {
         visible_subset_size: args.env.visible_subset_size,
         seed: Some(base_seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: if args.mock {
@@ -691,6 +692,7 @@ fn cmd_sweep(args: SweepArgs, scratch: bool) {
     ensure_cache_dir(&args.cache_path, args.mock);
 
     let llm = LlmSettings {
+        think: None,
         temperature: args.temperature,
         seed: args.llm_seed,
         cache_path: if args.mock {
@@ -868,6 +870,7 @@ fn cmd_poa(args: PoaArgs, scratch: bool) {
     let fitness_kind = poa_fitness_kind(args.mock, &args.cache_path);
 
     let llm = LlmSettings {
+        think: None,
         temperature: args.temperature,
         seed: args.llm_seed,
         // 適応度評価は FitnessKind が自分でキャッシュを開くので，条件としての
@@ -885,6 +888,7 @@ fn cmd_poa(args: PoaArgs, scratch: bool) {
         visible_subset_size: args.env.visible_subset_size,
         seed: Some(args.seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: None,
@@ -1090,6 +1094,7 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
         visible_subset_size: args.visible_subset_size,
         seed: Some(args.seed),
         llm: LlmSettings {
+            think: None,
             temperature: args.temperature,
             seed: args.llm_seed,
             cache_path: None,
@@ -1097,6 +1102,7 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
         ..Config::default()
     };
     let declared_llm = LlmSettings {
+        think: None,
         temperature: args.temperature,
         seed: args.llm_seed,
         cache_path: if mock {

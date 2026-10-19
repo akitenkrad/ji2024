@@ -656,8 +656,8 @@ mod tests {
     ///
     /// ここが変わるのは socsim の `derive_seed` が変わったときで，そのときは過去の
     /// run と結果を比較できなくなっている．Cargo.lock が socsim の commit を固定して
-    /// いるので，この値は依存を上げたときにだけ動く．どれも移行前の commit
-    /// (`6235b03`) が同じ引数で出す値と一致することを実測で確かめてある．
+    /// いるので，この値は依存を上げたときにだけ動く．今の値は，`derive_seed` に
+    /// finalizer が入った後の socsim が同じ引数で出す値である．
     #[test]
     fn golden_values_are_pinned() {
         assert_eq!(
@@ -668,12 +668,12 @@ mod tests {
                 SortStrategy::Fifo as u64,
                 0,
             ),
-            16_589_784_518_614_893_705,
+            9_891_066_748_787_184_214,
         );
-        assert_eq!(replicate_seed(42, 0), 12_668_979_023_698_771_201);
+        assert_eq!(replicate_seed(42, 0), 1_610_931_971_018_283_268);
         assert_eq!(
             matched_env_seed(42, EntryCondition::PSelect as u64, 0),
-            3_551_134_521_934_701_153,
+            8_581_447_364_540_300_161,
         );
     }
 

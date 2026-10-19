@@ -184,7 +184,12 @@ fn compute_metrics_sw_is_sum_of_utilities() {
 // ポリシー順序: SW(r_size) >= SW(r_random) (論文の核心知見)
 // --------------------------------------------------------------------------- //
 
+// mock クライアントではこの順序は頑健でない．40 シードで走査すると，
+// SW(r_size) >= SW(r_random) が成り立ったのは socsim の derive_seed が変わる前で
+// 単発 27/40 (matched 平均 13/20)，変わった後で 20/40 (12/20) だった．
+// これまで通っていたのは，たまたま使っていたシードによる．
 #[test]
+#[ignore = "mock ではシード次第で結論が変わる (上のコメント)"]
 fn r_size_sw_not_less_than_r_random() {
     let cfg_size = Config {
         policy: Policy {
@@ -318,7 +323,12 @@ fn predictor_surrogate_sanity() {
 // reproduce (mock): ポリシー順序 SW(r_size) >= SW(r_random) を平均でも満たす
 // --------------------------------------------------------------------------- //
 
+// mock クライアントではこの順序は頑健でない．40 シードで走査すると，
+// SW(r_size) >= SW(r_random) が成り立ったのは socsim の derive_seed が変わる前で
+// 単発 27/40 (matched 平均 13/20)，変わった後で 20/40 (12/20) だった．
+// これまで通っていたのは，たまたま使っていたシードによる．
 #[test]
+#[ignore = "mock ではシード次第で結論が変わる (上のコメント)"]
 fn reproduce_policy_ordering_holds_on_average() {
     use srap_simulation::policy::EntryCondition;
     // Table 2 の周辺平均 (entry を平均した r_size vs r_random) を matched seed で比較．
