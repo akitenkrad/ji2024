@@ -4,16 +4,15 @@
 Rust の `srap reproduce` が記録した run ディレクトリを読み，論文の知見を図と
 サマリで提示する (省略時は `runvault path --latest --subcommand reproduce`):
 
-  - Table 2: 入室条件 × 資源サブセット の社会的厚生 SW (棒グラフ)．論文の知見
-    «r_size 最高 / r_random 最低» を matched-seed paired win-rate で照合する．
+  - Table 2: 入室条件 × 資源サブセット の社会的厚生 SW (棒グラフ)．対応差の
+    wins/ties/losses・平均・標準誤差と，実行モードに応じた順序判定を提示する．
   - Table 3: POA 最適化ポリシー π_s* (満足度志向) / π_f* (公平性志向)．
   - Figure 4: POA の適応度 f(π) の世代収束曲線 (満足度 / 公平性)．
 
 論文値は GPT-3.5-turbo の合成環境固有なので **絶対値ではなく順序・符号** を再現目標と
 する (設計書 §7)．観測は run スコープの指標と `events.jsonl`
 (`x.ji2024.table2_cell` / `x.ji2024.poa_generation` / `x.ji2024.poa_best_policy`)
-にあり，PASS / off-anchor の判定は `artifacts/reproduce_summary.json` にある
-(帯はこちらが決めたものなので指標ではない)．図は run ディレクトリの外
+にあり，順序と POA の判定は `artifacts/reproduce_summary.json` にある．図は run ディレクトリの外
 (`<results-root>/<experiment>/figures/<run_slug>/`) に書き出す — `manifest.csv` は
 `finish()` が確定させるので，後から作ったものを `artifacts/` に入れるとハッシュを
 持たないファイルが記録に混ざる．
@@ -71,7 +70,7 @@ def _save_table2_fig(df: pd.DataFrame, out_path: str) -> None:
     ax.axhline(0.0, color="#888", lw=0.8)
     ax.set_xlabel("入室条件 E_queue")
     ax.set_ylabel("平均 社会的厚生 SW")
-    ax.set_title("論文の知見: r_size 最高 / r_random 最低 (matched-seed 比較で顕著)")
+    ax.set_title("Table 2: 入室条件 × 資源サブセットの平均 SW")
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", fontsize=9)
 
@@ -122,6 +121,13 @@ def _save_fig4(histories: dict[str, pd.DataFrame], out_path: str) -> None:
 
 def _verdict(ok: bool) -> str:
     return "PASS" if ok else "off-anchor"
+
+
+def _check_verdict(check: dict) -> str:
+    """新しい三値判定と旧 artifact の bool 判定を表示する．"""
+    if "verdict" in check:
+        return str(check["verdict"])
+    return _verdict(bool(check.get("pass", False)))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -183,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     for name, chk in verdict.get("checks", {}).items():
         print(
             f"  {name:<28} = {str(chk['observed']):<24} "
-            f"(論文: {chk['paper']}; {_verdict(chk['pass'])})"
+            f"(論文: {chk['paper']}; {_check_verdict(chk)})"
         )
     overall = verdict.get("overall_pass", False)
     print(f"\n総合判定: {_verdict(overall)}")

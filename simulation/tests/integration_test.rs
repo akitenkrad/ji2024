@@ -7,7 +7,7 @@
 //! ・指標の境界 (Gini ∈[0,1]・Rop ≥0)
 //! ・メカニズム配線 (metrics 行が生成される)
 //! ・離脱 (∅) 処理
-//! ・ポリシー順序 (SW(r_size) >= SW(r_random))
+//! ・mock 配分の不変量と資源サブセットに依存した偏りが無いこと
 //! ・最小 POA GA が適応度を単調非減少に保つ
 
 use srap_simulation::config::{Config, LlmSettings};
@@ -181,38 +181,82 @@ fn compute_metrics_sw_is_sum_of_utilities() {
 }
 
 // --------------------------------------------------------------------------- //
-// ポリシー順序: SW(r_size) >= SW(r_random) (論文の核心知見)
+// mock の検証範囲: 配分不変量とサブセット依存の偏り
 // --------------------------------------------------------------------------- //
 
-// mock クライアントではこの順序は頑健でない．40 シードで走査すると，
-// SW(r_size) >= SW(r_random) が成り立ったのは socsim の derive_seed が変わる前で
-// 単発 27/40 (matched 平均 13/20)，変わった後で 20/40 (12/20) だった．
-// これまで通っていたのは，たまたま使っていたシードによる．
+/// 属性を見ない mock では subset は割当の並べ替えしか変えないため，全資源が
+/// round 0 で配分され，同じ環境で配分面積の合計は subset 間で変わらない．
 #[test]
-#[ignore = "mock ではシード次第で結論が変わる (上のコメント)"]
-fn r_size_sw_not_less_than_r_random() {
-    let cfg_size = Config {
-        policy: Policy {
-            resource_subset: ResourceSubset::RSize,
-            ..Policy::default()
-        },
-        ..base_config()
+fn mock_allocation_invariants_hold_across_subsets() {
+    for seed in 0..50 {
+        let mut allocated_areas = Vec::new();
+        for subset in ResourceSubset::all() {
+            let cfg = Config {
+                policy: Policy {
+                    resource_subset: subset,
+                    ..Policy::default()
+                },
+                seed: Some(seed),
+                ..base_config()
+            };
+            let result = run_with_client(&cfg, scripted_first_home(), 0).unwrap();
+            assert_eq!(result.final_metrics.n_allocated, cfg.n_resources());
+            assert_eq!(result.final_round, 1);
+            allocated_areas
+                .push(result.final_metrics.avg_rsize * result.final_metrics.n_allocated as f64);
+        }
+        for pair in allocated_areas.windows(2) {
+            assert!(
+                (pair[0] - pair[1]).abs() <= 1e-9,
+                "seed {seed}: allocated area differs across subsets: {allocated_areas:?}"
+            );
+        }
+    }
+}
+
+/// 属性と家が独立なので，属性を見ない mock では E[SW(r_size) − SW(r_random)] と
+/// E[SW(r_rent) − SW(r_random)] は構成上 0 である．500 seed の実測はそれぞれ
+/// −5.2 ± 14.7 と −8.1 ± 11.4（平均 ± SE）だった．この検査は配分や指標に
+/// subset 依存の偏りが混入した回帰を検出する．
+#[test]
+fn mock_subset_policy_has_no_bias() {
+    let mut size_diffs = Vec::new();
+    let mut rent_diffs = Vec::new();
+    for seed in 0..200 {
+        let sw = |subset| {
+            let cfg = Config {
+                policy: Policy {
+                    resource_subset: subset,
+                    ..Policy::default()
+                },
+                seed: Some(seed),
+                ..base_config()
+            };
+            run_with_client(&cfg, scripted_first_home(), 0)
+                .unwrap()
+                .final_sw()
+        };
+        let random = sw(ResourceSubset::RRandom);
+        size_diffs.push(sw(ResourceSubset::RSize) - random);
+        rent_diffs.push(sw(ResourceSubset::RRent) - random);
+    }
+
+    let mean_and_se = |values: &[f64]| {
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        let sample_variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (values.len() - 1) as f64;
+        (mean, (sample_variance / values.len() as f64).sqrt())
     };
-    let cfg_rand = Config {
-        policy: Policy {
-            resource_subset: ResourceSubset::RRandom,
-            ..Policy::default()
-        },
-        ..base_config()
-    };
-    let r_size = run_with_client(&cfg_size, scripted_first_home(), 0).unwrap();
-    let r_rand = run_with_client(&cfg_rand, scripted_first_home(), 0).unwrap();
-    assert!(
-        r_size.final_sw() >= r_rand.final_sw(),
-        "SW(r_size)={} should be >= SW(r_random)={}",
-        r_size.final_sw(),
-        r_rand.final_sw()
-    );
+    for (label, diffs) in [("size", size_diffs), ("rent", rent_diffs)] {
+        let (mean, se) = mean_and_se(&diffs);
+        assert!(
+            mean.abs() < 4.0 * se,
+            "{label}−random bias: mean={mean}, SE={se}"
+        );
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -317,50 +361,4 @@ fn predictor_surrogate_sanity() {
         ..Policy::default()
     };
     assert!(p.predict(q).map(|v| v.is_finite()).unwrap_or(false));
-}
-
-// --------------------------------------------------------------------------- //
-// reproduce (mock): ポリシー順序 SW(r_size) >= SW(r_random) を平均でも満たす
-// --------------------------------------------------------------------------- //
-
-// mock クライアントではこの順序は頑健でない．40 シードで走査すると，
-// SW(r_size) >= SW(r_random) が成り立ったのは socsim の derive_seed が変わる前で
-// 単発 27/40 (matched 平均 13/20)，変わった後で 20/40 (12/20) だった．
-// これまで通っていたのは，たまたま使っていたシードによる．
-#[test]
-#[ignore = "mock ではシード次第で結論が変わる (上のコメント)"]
-fn reproduce_policy_ordering_holds_on_average() {
-    use srap_simulation::policy::EntryCondition;
-    // Table 2 の周辺平均 (entry を平均した r_size vs r_random) を matched seed で比較．
-    // matched seed: 同じ (entry, run) ペアに同一シードを与え，subset のみを変えて
-    // SW を比較する (論文の matched-seed 比較; ノイズを相殺する)．
-    let mean_sw = |subset: ResourceSubset| -> f64 {
-        let mut acc = 0.0;
-        let mut n = 0;
-        for (ei, entry) in EntryCondition::all().into_iter().enumerate() {
-            for run_idx in 0..3u64 {
-                let seed = 1000 + ei as u64 * 10 + run_idx; // subset に依存しない matched seed．
-                let cfg = Config {
-                    policy: Policy {
-                        entry_condition: entry,
-                        resource_subset: subset,
-                        ..Policy::default()
-                    },
-                    seed: Some(seed),
-                    ..base_config()
-                };
-                acc += run_with_client(&cfg, scripted_first_home(), 0)
-                    .unwrap()
-                    .final_sw();
-                n += 1;
-            }
-        }
-        acc / n as f64
-    };
-    let sw_size = mean_sw(ResourceSubset::RSize);
-    let sw_rand = mean_sw(ResourceSubset::RRandom);
-    assert!(
-        sw_size >= sw_rand,
-        "reproduce ordering: mean SW(r_size)={sw_size} >= SW(r_random)={sw_rand}"
-    );
 }

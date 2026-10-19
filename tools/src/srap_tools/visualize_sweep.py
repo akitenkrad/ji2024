@@ -66,7 +66,7 @@ def save_sweep_sw_by_subset(df: pd.DataFrame, out_path: str) -> None:
     ax.axhline(0.0, color="#888", lw=0.8)
     ax.set_xlabel("資源サブセット R_queue")
     ax.set_ylabel("平均 社会的厚生 SW")
-    ax.set_title("論文の知見: r_size 最高 / r_random 最低 (同一シード比較で顕著)")
+    ax.set_title("入室条件 × 資源サブセットの平均 SW")
     ax.grid(True, axis="y", alpha=0.3)
     ax.legend(loc="best", fontsize=9)
 

@@ -66,11 +66,11 @@ const RNG_ENGINE: u64    = 1;    // scheduler / 活性化シャッフル
 | `run` | 親 `run` + 試行ごとの子 `run-replicate` | ラウンドごとの指標 (`sw` …) は子の `metrics.csv`．`final_round` と `llm_*` は run スコープ |
 | `sweep` | 親 `sweep` + 試行ごとの子 `sweep-point` | 同上．セル座標は子の `parameters` |
 | `poa` | `poa` 1 本 | 世代パネルは `x.ji2024.poa_generation`，π\* は `x.ji2024.poa_best_policy` |
-| `reproduce` | `reproduce` 1 本 | Table 2 のセルは `x.ji2024.table2_cell`，2 つの最適化は POA イベント，勝率は run スコープ，判定は `artifacts/reproduce_summary.json` |
+| `reproduce` | `reproduce` 1 本 | Table 2 のセルは `x.ji2024.table2_cell`，2 つの最適化は POA イベント，対応比較の件数・平均差・標準誤差は run スコープ，判定は `artifacts/reproduce_summary.json` |
 | `mock_smoke` (example) | `mock-smoke` 1 本 | `run` の子と同じ |
 
-試行を子 run にしたのは，試行がラウンドごとの時系列を持つのに `metrics.csv` が系列 ID の列を持たないためである．同一セルの試行は `config_hash` が一致するので，«どれとどれが同じ条件の繰り返しか» は機械が答える．`reproduce` を 1 本のままにしたのは，paired win-rate が 1 回の実行の中の条件比較だからである．
+試行を子 run にしたのは，試行がラウンドごとの時系列を持つのに `metrics.csv` が系列 ID の列を持たないためである．同一セルの試行は `config_hash` が一致するので，«どれとどれが同じ条件の繰り返しか» は機械が答える．`reproduce` を 1 本のままにしたのは，対応比較が 1 回の実行の中で条件をまたぐためである．
 
 ## 再現 (`reproduce` サブコマンド)
 
-論文の主要結果を 1 コマンドで実行する: Table 2 (`(entry_condition, resource_subset)` の社会的厚生を matched-seed paired 比較; FIFO 固定)・Table 3 (POA 最適化の満足度志向 `π_s*` / 公平性志向 `π_f*`)・Figure 4 (目標別 POA 収束履歴)．セルを `x.ji2024.table2_cell`，最適化のパネルを `x.ji2024.poa_generation` / `x.ji2024.poa_best_policy`，勝率を run スコープの指標，PASS / off-anchor の判定を `artifacts/reproduce_summary.json` に記録する．`--mock` でオフライン，`--quick` で POA 予算を縮小する．
+論文の主要結果を 1 コマンドで実行する: Table 2 (`(entry_condition, resource_subset)` の社会的厚生を matched-seed paired 比較; FIFO 固定)・Table 3 (POA 最適化の満足度志向 `π_s*` / 公平性志向 `π_f*`)・Figure 4 (目標別 POA 収束履歴)．セルを `x.ji2024.table2_cell`，最適化のパネルを `x.ji2024.poa_generation` / `x.ji2024.poa_best_policy`，対応比較の wins/ties/losses・平均差・標準誤差を run スコープの指標に記録する．ライブ LLM の順序は 95% 信頼区間で 3 値判定し，`--mock` では `not_applicable` として総合判定から外す．`--quick` で POA 予算を縮小する．

@@ -15,7 +15,9 @@ LLM 出力は socsim の bit 単位再現性の **外側** にある．したが
 - **決定論的 socsim コア** — 合成応募者/資源プール初期化，入室条件によるキュー構成，決定論的配分規則 (S_queue 並び替え + k-deferrals; 二重割当なし・プール容量厳守)，満足度/公平性の各指標 (SW, Avg r_size, Avg WT, Var r_size, Rop 逆順ペア数, co-Gini ∈ [0,1], F(V,NV) 脆弱層ギャップ)，記憶更新．seed が与えられれば bit 単位で再現する (ChaCha20 `SimRng`; ストリーム 2 本: `RNG_WORLD_INIT=0`, `RNG_ENGINE=1`)．
 - **非決定的 LLM レイヤ** — 単一の `Decision` メカニズム (`ApplyDecision`)．各 active 応募者がプロファイル・可視資源・記憶から希望住宅を選択する．`socsim-llm` の `CachingClient` (`hash(prompt+model)` → 応答キャッシュ)・`temperature=0`・固定 seed で擬似決定論化する．プロバイダ順序は **Ollama 第一 → OpenAI フォールバック** (`FallbackClient`)．
 
-再現性の本体はモデルではなくキャッシュである．各実行はモデル・endpoint・温度を `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率を run スコープの指標 (`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`) に記録する．ローカル既定モデル (`llama3.2`) は論文の `gpt-3.5-turbo-0301` と異なるため，LLM 駆動の再現目標は **定性的** である．決定論的な配分/指標パスが定量的なコアであり，ポリシー間の SW の **順序** (`p_select`+`r_size` が最高，`r_random` が最低) は定性的に保たれるはずである．
+再現性の本体はモデルではなくキャッシュである．各実行はモデル・endpoint・温度を `run.json` の `llm` ブロックに，呼び出し数と cache-hit 率を run スコープの指標 (`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`) に記録する．ローカル既定モデル (`llama3.2`) は論文の `gpt-3.5-turbo-0301` と異なるため，LLM 駆動の再現目標は **定性的** である．決定論的な配分/指標パスが定量的なコアである．
+
+scripted mock（`--mock`，`scripted_first_home`）は，応募者のプロファイルに関係なく常に先頭の可視資源を選ぶ．このため資源サブセットのポリシーは «誰がどの家を得るか» を並べ替えるだけになり，E[SW(r_size) − SW(r_random)] は構成上 0 になる（500 シードで平均 −5.2 ± 14.7）．mock で確かめられるのは決定論性・配分の不変量・サブセットに依存した偏りが無いことまでで，論文のポリシー順序は確かめられない．順序の評価にはライブ LLM が要る．
 
 > 本プロジェクトは LLM レイヤを `socsim-llm` クレートに標準化し，`reqwest` / `sha2` は使わない (socsim-llm が HTTP とプロンプトハッシュを所有する)．これは han2023 / li2024 / zhao2024 / chuang2024 の sibling と統一するため，設計書の当初の `reqwest`+`sha2` 案を上書きするものである．
 
@@ -24,7 +26,7 @@ LLM 出力は socsim の bit 単位再現性の **外側** にある．したが
 - **`run`**: `SrapWorld` + 5 メカニズム + LLM クライアント層 + 単一ポリシー実行 (満足度・公平性指標)．
 - **`sweep`**: ポリシー因子の感度スイープ (入室条件 × 資源サブセット × 並び替え戦略)．
 - **`poa`** — Policy Optimization Agent: 配分ポリシー空間 `(E_queue, S_queue, R_queue, m, k, c)` 上の遺伝的アルゴリズム外側ループ (トーナメント選択 / 一様交叉 / 遺伝子単位の突然変異 / 1-エリート保存)．適応度は 1 回の SRAP 配分実行を `f_pi(metrics, objective)` で評価し，決定論的 scripted mock (`--mock`, オフライン・bit 決定論) かライブ LLM (Ollama→OpenAI + 永続キャッシュ) のいずれかで計算する．予測器 `f̃` サロゲート (評価済みポリシーの重み付き最近傍回帰) が «現行エリートに勝てない見込み» の個体のフル評価を枝刈りし，高価な評価を削減する．エリート保存により最良適応度は世代をまたいで単調非減少．
-- **`reproduce`**: 論文 Table 2 (ポリシー順序の社会的厚生)・Table 3 (POA 最適化ポリシー)・Figure 4 (POA 収束) を一括再現し，セルと最適化のパネルを `x.ji2024.*` イベントに，勝率を run スコープの指標に，PASS / off-anchor の判定を `artifacts/reproduce_summary.json` に記録する．
+- **`reproduce`**: 論文 Table 2 (ポリシー順序の社会的厚生)・Table 3 (POA 最適化ポリシー)・Figure 4 (POA 収束) を一括再現し，セルと最適化のパネルを `x.ji2024.*` イベントに，対応比較の wins/ties/losses・平均差・標準誤差を run スコープの指標に記録する．ライブ LLM では 95% 信頼区間から順序を 3 値判定し，mock の順序判定は `not_applicable` として総合判定から外す．
 
 ## インストールとクイックスタート
 
@@ -87,7 +89,7 @@ uv run srap-tools visualize-sweep   # POA 収束曲線を描く
 ### 論文再現 (Table 2/3 + Fig.4)
 
 ```bash
-# ポリシー順序の知見 + POA 最適化を一括再現 (オフライン)
+# 再現パイプラインと POA 最適化をオフラインで確認
 cargo run --release -- reproduce --mock --seed 42        # 高速スモークは --quick
 # 図を生成し観測 vs 論文の判定を再表示
 uv run srap-tools reproduce
@@ -101,9 +103,9 @@ uv run srap-tools reproduce
 ## テストと Lint
 
 ```bash
-cargo test --release   # mock (ScriptedClient) 駆動, ライブ LLM 不要 (52 テスト)
+cargo test --release   # mock (ScriptedClient) 駆動, ライブ LLM 不要
 cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all --check
 ```
 
 ## ドキュメント

@@ -31,7 +31,7 @@ uv run srap-tools visualize-sweep --sweep_dir results/20260525_120000_sweep   # 
 
 Outputs (depending on what the run recorded):
 
-- `sweep_sw_by_subset.png` — average SW by resource subset, coloured by entry condition (the r_size > r_random ordering is clearest with matched seeds — see [Reproduction](reproduction.md)).
+- `sweep_sw_by_subset.png` — average SW by resource subset, coloured by entry condition. A scripted-mock sweep does not assess the paper's policy ordering; see [Reproduction](reproduction.md).
 - `poa_convergence.png` — POA best/mean fitness over generations (Fig. 4-style; best is monotonically non-decreasing under elitism).
 
 ## `show-experiment-settings`

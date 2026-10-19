@@ -66,11 +66,11 @@ Output placement and identity belong to [runvault](https://github.com/akitenkrad
 | `run` | parent `run` + one `run-replicate` child per trial | per-round metrics (`sw`, …) in the child's `metrics.csv`; `final_round` and `llm_*` run-scope |
 | `sweep` | parent `sweep` + one `sweep-point` child per trial | same as above; the cell coordinates are in each child's `parameters` |
 | `poa` | one `poa` run | generation panel as `x.ji2024.poa_generation`; π\* as `x.ji2024.poa_best_policy` |
-| `reproduce` | one `reproduce` run | Table 2 cells as `x.ji2024.table2_cell`; the two optimizations as the POA events; win-rates run-scope; verdicts in `artifacts/reproduce_summary.json` |
+| `reproduce` | one `reproduce` run | Table 2 cells as `x.ji2024.table2_cell`; the two optimizations as the POA events; paired counts, mean differences and SEs run-scope; verdicts in `artifacts/reproduce_summary.json` |
 | `mock_smoke` (example) | one `mock-smoke` run | same as a `run` child |
 
-A trial becomes a child run because it carries a per-round time series and `metrics.csv` has no series column: same-cell trials share a `config_hash`, so «which of these are repeats of one condition» is a machine's question. `reproduce` stays one run because its paired win-rate compares conditions inside a single execution.
+A trial becomes a child run because it carries a per-round time series and `metrics.csv` has no series column: same-cell trials share a `config_hash`, so «which of these are repeats of one condition» is a machine's question. `reproduce` stays one run because its paired comparison spans conditions inside a single execution.
 
 ## Reproduction (`reproduce` subcommand)
 
-Runs the paper's headline results in one command: Table 2 (matched-seed paired comparison of social welfare across `(entry_condition, resource_subset)`, FIFO fixed), Table 3 (POA-optimized satisfaction `π_s*` and fairness `π_f*` policies) and Figure 4 (per-objective POA convergence history). Records the cells as `x.ji2024.table2_cell`, the optimization panels as `x.ji2024.poa_generation` / `x.ji2024.poa_best_policy`, the win-rates as run-scope metrics and the PASS / off-anchor verdicts as `artifacts/reproduce_summary.json`; `--mock` runs offline, `--quick` shrinks the POA budget.
+Runs the paper's headline results in one command: Table 2 (matched-seed paired comparison of social welfare across `(entry_condition, resource_subset)`, FIFO fixed), Table 3 (POA-optimized satisfaction `π_s*` and fairness `π_f*` policies) and Figure 4 (per-objective POA convergence history). Records the cells as `x.ji2024.table2_cell`, the optimization panels as `x.ji2024.poa_generation` / `x.ji2024.poa_best_policy`, and paired wins/ties/losses plus mean differences and standard errors as run-scope metrics. A live LLM uses the 95% confidence interval for a three-way ordering verdict; `--mock` records `not_applicable` for ordering and excludes it from the overall verdict. `--quick` shrinks the POA budget.

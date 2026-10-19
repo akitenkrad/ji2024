@@ -300,8 +300,8 @@ def table2(run_dir: str | os.PathLike) -> pd.DataFrame:
 def reproduce_verdict(run_dir: str | os.PathLike) -> dict:
     """`reproduce` の判定 (`artifacts/reproduce_summary.json`)．
 
-    PASS / off-anchor と «過半数なら成立» の帯はこちらが決めたものなので，指標でも
-    論文の報告値でもなく `artifacts/` にある．legacy なディレクトリでは run
+    95% 信頼区間による順序判定は論文の報告値ではなく `artifacts/` にある．
+    legacy なディレクトリでは run
     ディレクトリ直下にあり，中身の形も違う (観測値を同居させていた)．
     """
     run_dir = Path(run_dir)

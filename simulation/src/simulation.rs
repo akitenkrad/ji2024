@@ -241,7 +241,6 @@ pub fn run_with_client_observed(
 mod tests {
     use super::*;
     use crate::llm::wrap_client;
-    use crate::policy::{Policy, ResourceSubset};
     use socsim_llm::mock::ScriptedClient;
     use socsim_llm::PromptCache;
 
@@ -297,29 +296,5 @@ mod tests {
         let sa: Vec<f64> = a.metrics.iter().map(|m| m.sw).collect();
         let sb: Vec<f64> = b.metrics.iter().map(|m| m.sw).collect();
         assert_eq!(sa, sb, "同一シード + 同一 mock は完全再現すべき");
-    }
-
-    #[test]
-    fn r_size_beats_r_random_sw() {
-        // 同一 seed・同一 mock で r_size と r_random の最終 SW を比較する．
-        let mut c_size = cfg();
-        c_size.policy = Policy {
-            resource_subset: ResourceSubset::RSize,
-            ..Policy::default()
-        };
-        let mut c_rand = cfg();
-        c_rand.policy = Policy {
-            resource_subset: ResourceSubset::RRandom,
-            ..Policy::default()
-        };
-        let r_size = run_with_client(&c_size, scripted_first_home(), 0).unwrap();
-        let r_rand = run_with_client(&c_rand, scripted_first_home(), 0).unwrap();
-        // mock は «最初の可視 home» を選ぶ → r_size は広い家から提示するので SW が高い．
-        assert!(
-            r_size.final_sw() >= r_rand.final_sw(),
-            "SW(r_size)={} should be >= SW(r_random)={}",
-            r_size.final_sw(),
-            r_rand.final_sw()
-        );
     }
 }

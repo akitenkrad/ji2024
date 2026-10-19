@@ -15,7 +15,9 @@ LLM output is **outside** socsim's bit-reproducibility. The design therefore spl
 - **Deterministic socsim core** — synthetic applicant/pool initialization, entry-condition queue building, the deterministic allocation rule (S_queue sorting + k-deferrals, no double-allocation, pool capacity respected), and all welfare/fairness metrics (SW, Avg r_size, Avg WT, Var r_size, Rop inverse-order-pairs, co-Gini ∈ [0,1], F(V,NV) vulnerable gap), and memory updates. Given a seed these reproduce bit-for-bit (ChaCha20 `SimRng`, two streams: `RNG_WORLD_INIT=0`, `RNG_ENGINE=1`).
 - **Non-deterministic LLM layer** — the single `Decision` mechanism (`ApplyDecision`), where each active applicant chooses a desired home from its visible resources, profile and memory. Pseudo-determinised by `socsim-llm`'s `CachingClient` (a `hash(prompt+model)` → response cache), `temperature=0` and a fixed seed. The provider order is **Ollama first → OpenAI fallback** via `socsim-llm`'s `FallbackClient`.
 
-The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses. Each run records the model, endpoint and temperature in `run.json`'s `llm` block, and the call count / cache-hit rate as run-scope metrics (`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`). Because the local default model (`llama3.2`) differs from the paper's `gpt-3.5-turbo-0301`, the LLM-driven reproduction target is **qualitative**; the deterministic allocation/metrics path is the quantitative-ish core (the SW *ordering* across policies — `p_select`+`r_size` highest, `r_random` lowest — should hold qualitatively).
+The cache — not the model — is the reproducibility mechanism: a warm cache replays identical responses. Each run records the model, endpoint and temperature in `run.json`'s `llm` block, and the call count / cache-hit rate as run-scope metrics (`llm_calls` / `llm_cache_hits` / `llm_cache_hit_rate`). Because the local default model (`llama3.2`) differs from the paper's `gpt-3.5-turbo-0301`, the LLM-driven reproduction target is **qualitative**; the deterministic allocation/metrics path is the quantitative-ish core.
+
+The scripted mock (`--mock`, `scripted_first_home`) always applies for the first visible home, independent of the applicant's profile. Under it the subset policy only permutes which applicant receives which home, so E[SW(r_size) − SW(r_random)] = 0 by construction (500 seeds: mean −5.2 ± 14.7). The mock therefore verifies determinism, allocation invariants and the absence of subset-dependent bias, not the paper's policy ordering; the ordering can only be assessed with a live LLM.
 
 > This project standardises on the `socsim-llm` crate for the LLM layer; it does **not** use `reqwest` or `sha2` (socsim-llm owns the HTTP transport and the prompt-cache hashing), overriding the design doc's original `reqwest`+`sha2` plan to stay consistent with the han2023 / li2024 / zhao2024 / chuang2024 siblings.
 
@@ -24,7 +26,7 @@ The cache — not the model — is the reproducibility mechanism: a warm cache r
 - **`run`**: `SrapWorld` + the 5 mechanisms + the LLM client layer + a single-policy run (welfare & fairness metrics).
 - **`sweep`**: the policy-factor sensitivity sweep (entry conditions × resource subsets × sort strategies).
 - **`poa`** — the Policy Optimization Agent: a genetic-algorithm outer loop (tournament selection / uniform crossover / per-gene mutation / 1-elitism) over the allocation-policy parameter space `(E_queue, S_queue, R_queue, m, k, c)`. Fitness is one SRAP allocation run scored by `f_pi(metrics, objective)`, evaluated either with the deterministic scripted mock (`--mock`, offline / bit-deterministic) or with the live LLM (Ollama→OpenAI + persistent cache). A predictor `f̃` surrogate (weighted nearest-neighbour regression over already-evaluated policies) prunes full evaluations for candidates that the surrogate predicts cannot beat the current elite, cutting expensive evaluations. Elitism keeps the best fitness monotonically non-decreasing across generations.
-- **`reproduce`**: a one-command reproduction of the paper's Table 2 (policy-ordering social welfare), Table 3 (POA-optimized satisfaction/fairness policies) and Figure 4 (POA convergence), recording the cells and the optimization panels as `x.ji2024.*` events, the win-rates as run-scope metrics, and the PASS / off-anchor verdicts as `artifacts/reproduce_summary.json`.
+- **`reproduce`**: a one-command reproduction of the paper's Table 2 (policy-ordering social welfare), Table 3 (POA-optimized satisfaction/fairness policies) and Figure 4 (POA convergence), recording the cells and optimization panels as `x.ji2024.*` events and paired wins/ties/losses plus mean differences and standard errors as run-scope metrics. A live LLM gives a three-way ordering verdict from the 95% confidence interval; mock ordering is `not_applicable` and excluded from the overall verdict.
 
 ## Install & Quick start
 
@@ -87,7 +89,7 @@ uv run srap-tools visualize-sweep   # plots the POA convergence curve
 ### Paper reproduction (Table 2/3 + Fig. 4)
 
 ```bash
-# Reproduce the policy-ordering finding + POA optimization (offline)
+# Exercise the reproduction pipeline and POA optimization offline
 cargo run --release -- reproduce --mock --seed 42        # --quick for a fast smoke
 # Render the figures and re-print the observed-vs-paper verdict
 uv run srap-tools reproduce
@@ -101,9 +103,9 @@ Use `--scratch` for development, debugging, and smoke-test runs. Scratch runs ar
 ## Testing & Linting
 
 ```bash
-cargo test --release   # mock (ScriptedClient) driven, no live LLM (52 tests)
+cargo test --release   # mock (ScriptedClient) driven, no live LLM
 cargo clippy --all-targets -- -D warnings
-cargo fmt --check
+cargo fmt --all --check
 ```
 
 ## Documentation

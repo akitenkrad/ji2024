@@ -86,28 +86,62 @@ unit      = "count"
 direction = "none"
 scope     = ["run"]
 
-[metrics."paired_wins_rsize_ge_rrandom"]
-meaning   = "同じ環境で r_size の社会厚生が r_random 以上だった回数"
+[metrics."paired_wins_rsize_vs_rrandom"]
+meaning   = "同じ環境で r_size の社会厚生が r_random より大きかった回数"
 unit      = "count"
 direction = "none"
 scope     = ["run"]
 
-[metrics."paired_wins_rrent_ge_rrandom"]
-meaning   = "同じ環境で r_rent の社会厚生が r_random 以上だった回数"
+[metrics."paired_ties_rsize_vs_rrandom"]
+meaning   = "同じ環境で r_size と r_random の社会厚生が等しかった回数"
 unit      = "count"
 direction = "none"
 scope     = ["run"]
 
-[metrics."paired_win_rate_rsize_ge_rrandom"]
-meaning   = "対応比較した環境のうち r_size の社会厚生が r_random 以上だった割合"
-unit      = "ratio"
+[metrics."paired_losses_rsize_vs_rrandom"]
+meaning   = "同じ環境で r_size の社会厚生が r_random より小さかった回数"
+unit      = "count"
 direction = "none"
-range     = [0.0, 1.0]
 scope     = ["run"]
 
-[metrics."paired_win_rate_rrent_ge_rrandom"]
-meaning   = "対応比較した環境のうち r_rent の社会厚生が r_random 以上だった割合"
-unit      = "ratio"
+[metrics."paired_mean_sw_diff_rsize_minus_rrandom"]
+meaning   = "同じ環境で対応比較した SW(r_size) − SW(r_random) の平均"
+unit      = "utility"
 direction = "none"
-range     = [0.0, 1.0]
+scope     = ["run"]
+
+[metrics."paired_se_sw_diff_rsize_minus_rrandom"]
+meaning   = "同じ環境で対応比較した SW(r_size) − SW(r_random) の平均の標準誤差"
+unit      = "utility"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_wins_rrent_vs_rrandom"]
+meaning   = "同じ環境で r_rent の社会厚生が r_random より大きかった回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_ties_rrent_vs_rrandom"]
+meaning   = "同じ環境で r_rent と r_random の社会厚生が等しかった回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_losses_rrent_vs_rrandom"]
+meaning   = "同じ環境で r_rent の社会厚生が r_random より小さかった回数"
+unit      = "count"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_mean_sw_diff_rrent_minus_rrandom"]
+meaning   = "同じ環境で対応比較した SW(r_rent) − SW(r_random) の平均"
+unit      = "utility"
+direction = "none"
+scope     = ["run"]
+
+[metrics."paired_se_sw_diff_rrent_minus_rrandom"]
+meaning   = "同じ環境で対応比較した SW(r_rent) − SW(r_random) の平均の標準誤差"
+unit      = "utility"
+direction = "none"
 scope     = ["run"]

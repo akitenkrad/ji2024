@@ -30,7 +30,7 @@
 //!
 //! `poa` は世代を時間軸に持つ 1 回の最適化，`reproduce` は 2 つの目標について
 //! 最適化を回したうえで条件どうしを比較して判定を出す 1 回の実行である．
-//! `reproduce` の «paired win-rate» は条件をまたぐ比較そのものなので，条件を
+//! `reproduce` の対応比較は条件をまたぐ比較そのものなので，条件を
 //! 子 run に割ると起きていない実行を主張することになる．どちらも run は 1 本で，
 //! 世代パネルは `x.ji2024.poa_generation`，条件表は `x.ji2024.table2_cell` /
 //! `x.ji2024.poa_best_policy` の名前空間つきイベントに置く．
@@ -128,9 +128,8 @@ pub fn replication_all() -> Replication {
 // 量とは単位も尺度も違う．設計書 §7 が再現目標に置いているのは絶対値ではなく
 // «r_size 最高 / r_random 最低» という順序と «POA が f(π) を改善する» という符号で，
 // これは数ではない (`Target::claim` ではなく表・図を target に取っているのはこのため)．
-// 判定に使う «過半数の環境で成立すれば PASS» の 0.5 はこちらが決めた帯なので，
-// 論文の報告値の欄には当然置けない — 判定は `artifacts/reproduce_summary.json` と
-// コンソールに残す．
+// 対応差の 95% 信頼区間による判定は論文の報告値ではないため，
+// `artifacts/reproduce_summary.json` とコンソールに残す．
 
 // ---------------------------------------------------------------------------
 // LLM ブロック
@@ -585,26 +584,149 @@ pub fn log_table2_cell(
 /// `reproduce_summary.json` が持っていたが，どれも Table 2 のセルそのものなので
 /// 書かない (`p_select` 行と最大値は読み側が引ける)．
 ///
-/// 勝ち数と勝率の両方を書くのは，比が «分母が何本だったか» を持たないためである
-/// (`llm_cache_hits` と `llm_cache_hit_rate` を両方書くのと同じ)．
-pub fn log_reproduce_summary(
-    run: &mut Run,
-    n_matched_environments: usize,
-    size_wins: usize,
-    rent_wins: usize,
-) {
-    let n = n_matched_environments as f64;
+/// 対応比較の要約．差は左辺から右辺を引く．
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PairedComparison {
+    pub wins: usize,
+    pub ties: usize,
+    pub losses: usize,
+    pub mean_diff: f64,
+    pub standard_error: f64,
+}
+
+impl PairedComparison {
+    pub fn n(&self) -> usize {
+        self.wins + self.ties + self.losses
+    }
+
+    pub fn confidence_interval_95(&self) -> (f64, f64) {
+        let margin = 1.96 * self.standard_error;
+        (self.mean_diff - margin, self.mean_diff + margin)
+    }
+
+    pub fn assess_ordering(&self, mock: bool) -> OrderingAssessment {
+        if mock {
+            return OrderingAssessment::NotApplicable;
+        }
+        let (lower, upper) = self.confidence_interval_95();
+        if lower > 0.0 {
+            OrderingAssessment::Pass
+        } else if upper < 0.0 {
+            OrderingAssessment::Reversed
+        } else {
+            OrderingAssessment::Inconclusive
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderingAssessment {
+    Pass,
+    Reversed,
+    Inconclusive,
+    NotApplicable,
+}
+
+impl OrderingAssessment {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Reversed => "reversed",
+            Self::Inconclusive => "inconclusive",
+            Self::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// 同じ環境で得た 2 系列を，左辺 − 右辺の対応差として要約する．
+pub fn paired_comparison(left: &[f64], right: &[f64]) -> PairedComparison {
+    assert_eq!(left.len(), right.len(), "対応比較の系列長が異なる");
+    assert!(!left.is_empty(), "対応比較には 1 組以上が必要");
+
+    let diffs: Vec<f64> = left
+        .iter()
+        .zip(right)
+        .map(|(left, right)| left - right)
+        .collect();
+    let wins = diffs.iter().filter(|diff| **diff > 0.0).count();
+    let ties = diffs.iter().filter(|diff| **diff == 0.0).count();
+    let losses = diffs.len() - wins - ties;
+    let mean_diff = diffs.iter().sum::<f64>() / diffs.len() as f64;
+    let standard_error = if diffs.len() > 1 {
+        let sample_variance = diffs
+            .iter()
+            .map(|diff| (diff - mean_diff).powi(2))
+            .sum::<f64>()
+            / (diffs.len() - 1) as f64;
+        (sample_variance / diffs.len() as f64).sqrt()
+    } else {
+        0.0
+    };
+
+    PairedComparison {
+        wins,
+        ties,
+        losses,
+        mean_diff,
+        standard_error,
+    }
+}
+
+/// wins/ties/losses と対応差の平均・標準誤差を run スコープへ記録する．
+pub fn log_reproduce_summary(run: &mut Run, size: &PairedComparison, rent: &PairedComparison) {
+    assert_eq!(size.n(), rent.n(), "対応比較の環境数が異なる");
     run.log_metrics(
         SCOPE,
         &[
-            ("n_matched_environments", n),
-            ("paired_wins_rsize_ge_rrandom", size_wins as f64),
-            ("paired_wins_rrent_ge_rrandom", rent_wins as f64),
-            ("paired_win_rate_rsize_ge_rrandom", size_wins as f64 / n),
-            ("paired_win_rate_rrent_ge_rrandom", rent_wins as f64 / n),
+            ("n_matched_environments", size.n() as f64),
+            ("paired_wins_rsize_vs_rrandom", size.wins as f64),
+            ("paired_ties_rsize_vs_rrandom", size.ties as f64),
+            ("paired_losses_rsize_vs_rrandom", size.losses as f64),
+            ("paired_mean_sw_diff_rsize_minus_rrandom", size.mean_diff),
+            ("paired_se_sw_diff_rsize_minus_rrandom", size.standard_error),
+            ("paired_wins_rrent_vs_rrandom", rent.wins as f64),
+            ("paired_ties_rrent_vs_rrandom", rent.ties as f64),
+            ("paired_losses_rrent_vs_rrandom", rent.losses as f64),
+            ("paired_mean_sw_diff_rrent_minus_rrandom", rent.mean_diff),
+            ("paired_se_sw_diff_rrent_minus_rrandom", rent.standard_error),
         ],
     )
     .expect("reproduce の run スコープ指標の記録に失敗");
+}
+
+#[cfg(test)]
+mod paired_comparison_tests {
+    use super::{paired_comparison, OrderingAssessment};
+
+    #[test]
+    fn paired_comparison_separates_wins_ties_and_losses() {
+        let summary = paired_comparison(&[4.0, 2.0, 1.0], &[3.0, 2.0, 2.0]);
+        assert_eq!(summary.wins, 1);
+        assert_eq!(summary.ties, 1);
+        assert_eq!(summary.losses, 1);
+        assert!((summary.mean_diff - 0.0).abs() < 1e-12);
+        assert!((summary.standard_error - (1.0_f64 / 3.0).sqrt()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn live_ordering_uses_the_95_percent_confidence_interval() {
+        let pass = paired_comparison(&[3.0, 4.0, 5.0], &[1.0, 2.0, 3.0]);
+        let reversed = paired_comparison(&[1.0, 2.0, 3.0], &[3.0, 4.0, 5.0]);
+        let inconclusive = paired_comparison(&[2.0, 4.0, 3.0], &[3.0, 2.0, 3.0]);
+        assert_eq!(pass.assess_ordering(false), OrderingAssessment::Pass);
+        assert_eq!(
+            reversed.assess_ordering(false),
+            OrderingAssessment::Reversed
+        );
+        assert_eq!(
+            inconclusive.assess_ordering(false),
+            OrderingAssessment::Inconclusive
+        );
+        assert_eq!(
+            pass.assess_ordering(true),
+            OrderingAssessment::NotApplicable
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1022,7 +1022,7 @@ fn print_poa_result(objective: &str, result: &PoaResult, use_predictor: bool) {
 // reproduce — Table 2/3・Fig.4 一括再現
 // ---------------------------------------------------------------------------
 
-/// PASS / off-anchor の判定文字列を作る．
+/// 真偽値で表す POA と総合判定の表示文字列を作る．
 fn verdict(ok: bool) -> &'static str {
     if ok {
         "PASS"
@@ -1034,7 +1034,7 @@ fn verdict(ok: bool) -> &'static str {
 /// 子 run を作らずに 1 試行を回す (`reproduce` の Table 2 用)．
 ///
 /// `reproduce` は «同じ環境で資源サブセットだけを変えた» paired 比較を 1 回の実行の
-/// 中で行い，その勝率を判定に使う．条件を子 run に割ると，起きていない実行を
+/// 中で行う．条件を子 run に割ると，起きていない実行を
 /// 主張することになるうえ比較そのものが run をまたぐので，ここでは run を分けない．
 fn run_inline(
     cfg: &Config,
@@ -1056,15 +1056,15 @@ struct Table3Row {
 }
 
 /// reproduce: Table 2 (ポリシー順序の社会的厚生) + Table 3 / Fig.4 (POA 最適化) を
-/// 一括再現する．論文値は GPT-3.5-turbo の合成環境固有なので **絶対値ではなく順序・
-/// 符号** を再現目標とする (設計書 §7)．観測値と論文の知見を PASS / off-anchor で照合し，
-/// 判定は `artifacts/reproduce_summary.json` に，観測そのものは指標と
+/// 一括再現する．論文値は GPT-3.5-turbo の合成環境固有なので，ライブ LLM では
+/// 絶対値ではなく順序・符号を再現目標とする．mock では順序を判定せず，配分パスの
+/// 検証に限る．判定は `artifacts/reproduce_summary.json` に，観測そのものは指標と
 /// `events.jsonl` に残す．
 fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     let mock = args.mock;
     let quick = args.quick;
-    // quick は POA 世代数・個体群と応募者数を縮小して高速化する．Table 2 の paired
-    // win-rate は環境数 (= entries × runs) が少ないと不安定なため runs は据え置く．
+    // quick は POA 世代数・個体群と応募者数を縮小して高速化する．Table 2 の対応差は
+    // 環境数 (= entries × runs) が少ないと標準誤差が不安定なため runs は据え置く．
     let runs = args.runs;
     let poa_iters = if quick { 6 } else { args.poa_iterations };
     let poa_pool = if quick { 8 } else { args.poa_pool_size };
@@ -1160,12 +1160,11 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
 
     // ── Table 2: 入室条件 × 資源サブセット の SW (FIFO 固定; matched-seed paired) ──
     //
-    // 論文の知見 (r_size 最高 / r_random 最低) は «同じ環境上で資源サブセットだけを
-    // 変えた matched-seed 比較» で最も頑健に出る．独立シードの平均比較は環境ノイズで
-    // 順序が崩れやすい (大きい家ほど rent ペナルティが累積する合成効果のため)．そこで
-    // 各 (entry, run) の **同一環境** で r_size / r_rent / r_random を比較し，
-    // SW(r_size) >= SW(r_random) が成立した環境の **割合 (paired win-rate)** で判定する
-    // (符号ではなく順序が再現目標; 設計書 §7)．各セルの平均 SW はイベントに残す．
+    // 論文の知見 (r_size 最高 / r_random 最低) は，同じ環境上で資源サブセットだけを
+    // 変える matched-seed 対応差で調べる．各 (entry, run) の同一環境で
+    // r_size / r_rent / r_random を比較し，対応差の平均と標準誤差を記録する．
+    // 属性を見ない mock では subset は割当の並べ替えしか変えず，対応差の期待値は
+    // 構成上 0 なので順序を判定しない．各セルの平均 SW はイベントに残す．
     let entries = EntryCondition::all();
     let subsets = ResourceSubset::all();
     // (entry,subset) → 各 run の SW 列 (paired 比較用)．
@@ -1175,7 +1174,7 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     // Table 2 の stage．単位は run / sweep と同じ «応募者 1 人の決定» で，分母を
     // 持たない理由も同じ．Table 3 の POA とは 1 tick の意味も費用も違うので，
     // 同じ stage には混ぜない．
-    println!("[Table 2] ポリシー順序サニティ (matched-seed paired; FIFO 固定):");
+    println!("[Table 2] 社会的厚生の対応比較 (matched-seed paired; FIFO 固定):");
     let (stage, observer) = share_stage(rv.unbounded_stage("table2"));
     for &entry in &entries {
         for &subset in &subsets {
@@ -1213,27 +1212,24 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     }
     close_shared(&stage);
 
-    // paired win-rate: 全 (entry, run) 環境のうち SW(r_size) >= SW(r_random) の割合．
-    let paired_winrate = |a: ResourceSubset, b: ResourceSubset| -> (usize, usize) {
-        let mut wins = 0;
-        let mut total = 0;
+    let paired_summary = |a: ResourceSubset, b: ResourceSubset| {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
         for &entry in &entries {
             let va = &sw_runs[&(entry, a)];
             let vb = &sw_runs[&(entry, b)];
             for (sa, sb) in va.iter().zip(vb.iter()) {
-                if sa >= sb {
-                    wins += 1;
-                }
-                total += 1;
+                left.push(*sa);
+                right.push(*sb);
             }
         }
-        (wins, total.max(1))
+        record::paired_comparison(&left, &right)
     };
-    let (size_wins, n_env) = paired_winrate(ResourceSubset::RSize, ResourceSubset::RRandom);
-    let (rent_wins, _) = paired_winrate(ResourceSubset::RRent, ResourceSubset::RRandom);
-    let size_winrate = size_wins as f64 / n_env as f64;
-    let rent_winrate = rent_wins as f64 / n_env as f64;
-    record::log_reproduce_summary(&mut rv, n_env, size_wins, rent_wins);
+    let size_comparison = paired_summary(ResourceSubset::RSize, ResourceSubset::RRandom);
+    let rent_comparison = paired_summary(ResourceSubset::RRent, ResourceSubset::RRandom);
+    let size_assessment = size_comparison.assess_ordering(mock);
+    let rent_assessment = rent_comparison.assess_ordering(mock);
+    record::log_reproduce_summary(&mut rv, &size_comparison, &rent_comparison);
 
     // headline 条件 (p_select) の平均 SW も表示する (paper の最高 SW 条件)．
     let mean_cell =
@@ -1244,19 +1240,27 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
     println!(
         "  E=p_select 平均 SW: r_size={sw_rsize:.2} r_rent={sw_rrent:.2} r_random={sw_rrandom:.2}"
     );
-    // 論文の知見: SW(r_size) >= SW(r_random) (r_size 最高 / r_random 最低)．過半数の
-    // 環境で成立すれば PASS (matched-seed paired 比較)．
-    let order_size_ge_random = size_winrate >= 0.5;
-    let order_rent_ge_random = rent_winrate >= 0.5;
-    println!(
-        "  paired win-rate SW(r_size)>=SW(r_random): {:.0}% ({}/{}) {} | SW(r_rent)>=SW(r_random): {:.0}% {}",
-        size_winrate * 100.0,
-        size_wins,
-        n_env,
-        verdict(order_size_ge_random),
-        rent_winrate * 100.0,
-        verdict(order_rent_ge_random),
-    );
+    let print_comparison = |left: &str,
+                            comparison: &record::PairedComparison,
+                            assessment: record::OrderingAssessment| {
+        let (ci_lower, ci_upper) = comparison.confidence_interval_95();
+        println!(
+            "  {left}−r_random: wins/ties/losses={}/{}/{} | mean diff={:.2}, SE={:.2}, 95% CI=[{:.2}, {:.2}] | 順序判定: {}",
+            comparison.wins,
+            comparison.ties,
+            comparison.losses,
+            comparison.mean_diff,
+            comparison.standard_error,
+            ci_lower,
+            ci_upper,
+            assessment.label(),
+        );
+    };
+    print_comparison("r_size", &size_comparison, size_assessment);
+    print_comparison("r_rent", &rent_comparison, rent_assessment);
+    if mock {
+        println!("  mock は応募者属性を見ないため，ポリシー順序の期待差は構成上 0");
+    }
 
     // 最高 平均 SW を与えるポリシー (entry+subset) も報告する (論文: p_select + r_size)．
     let best_cell = sw_runs
@@ -1318,30 +1322,59 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
         .iter()
         .all(|r| r.final_fitness >= r.initial_fitness - 1e-9);
     let predictor_saved: usize = table3.iter().map(|r| r.evals_saved).sum();
-    let overall = order_size_ge_random && poa_improves;
+    let ordering_passes = mock || size_assessment == record::OrderingAssessment::Pass;
+    let overall = ordering_passes && poa_improves;
 
     // ── 判定 (artifacts) ─────────────────────────────────────────────────────
     //
-    // PASS / off-anchor と «過半数なら成立» の 0.5 はこちらが決めた帯であって，
-    // 論文が印字した数でも観測そのものでもない．指標にも `reference.csv` にも
-    // 置けないので `artifacts/` に残す．観測の実体は run スコープの指標
-    // (`paired_win_rate_*` / `paired_wins_*` / `n_matched_environments`) と
+    // 判定は論文が印字した数でも観測そのものでもないため `artifacts/` に残す．
+    // 観測の実体は run スコープの wins/ties/losses・対応差の平均・標準誤差と
     // `events.jsonl` (`x.ji2024.table2_cell` / `x.ji2024.poa_best_policy`) にある．
+    let comparison_json = |comparison: &record::PairedComparison,
+                           assessment: record::OrderingAssessment,
+                           paper: &str,
+                           included_in_overall: bool| {
+        let (ci_lower, ci_upper) = comparison.confidence_interval_95();
+        serde_json::json!({
+            "observed": format!(
+                "wins/ties/losses={}/{}/{}; mean diff={:.2}; SE={:.2}; 95% CI=[{:.2}, {:.2}]",
+                comparison.wins,
+                comparison.ties,
+                comparison.losses,
+                comparison.mean_diff,
+                comparison.standard_error,
+                ci_lower,
+                ci_upper,
+            ),
+            "paper": paper,
+            "threshold": "PASS if 95% CI lower bound > 0; reversed if upper bound < 0; otherwise inconclusive",
+            "verdict": assessment.label(),
+            "included_in_overall": included_in_overall,
+            "wins": comparison.wins,
+            "ties": comparison.ties,
+            "losses": comparison.losses,
+            "mean_difference": comparison.mean_diff,
+            "standard_error": comparison.standard_error,
+            "ci_95_lower": ci_lower,
+            "ci_95_upper": ci_upper,
+        })
+    };
     let summary = serde_json::json!({
         "paper": "Ji et al. (2024) SRAP-Agent (Findings of EMNLP 2024)",
+        "decision_mode": if mock { "mock" } else { "live_llm" },
         "checks": {
-            "sw_rsize_ge_rrandom": {
-                "observed": format!("{}/{} matched envs ({:.0}%)", size_wins, n_env, size_winrate * 100.0),
-                "paper": "r_size highest, r_random lowest",
-                "threshold": "paired win-rate >= 50% (this implementation's band, not the paper's)",
-                "pass": order_size_ge_random,
-            },
-            "sw_rrent_ge_rrandom": {
-                "observed": format!("{}/{} matched envs ({:.0}%)", rent_wins, n_env, rent_winrate * 100.0),
-                "paper": "r_rent comparable to r_size, both > r_random",
-                "threshold": "paired win-rate >= 50% (this implementation's band, not the paper's)",
-                "pass": order_rent_ge_random,
-            },
+            "sw_rsize_minus_rrandom": comparison_json(
+                &size_comparison,
+                size_assessment,
+                "r_size highest, r_random lowest",
+                !mock,
+            ),
+            "sw_rrent_minus_rrandom": comparison_json(
+                &rent_comparison,
+                rent_assessment,
+                "r_rent comparable to r_size, both > r_random",
+                false,
+            ),
             "poa_improves_or_holds": {
                 "observed": poa_improves,
                 "paper": "POA-optimized policy fitness >= baseline (elitism, Fig.4 trend)",
@@ -1353,8 +1386,7 @@ fn cmd_reproduce(args: ReproduceArgs, scratch: bool) {
                 "pass": true,
             },
         },
-        // 論文の核心知見 = «r_size 最高 / r_random 最低» (r_rent は副次; 論文も r_rent
-        // ≈ r_size と述べるが合成 rent ペナルティで揺れうる) + POA が厚生を改善．
+        // mock では 2 つの順序チェックを総合判定から外し，POA の検査だけを使う．
         "overall_pass": overall,
     });
     let artifacts = rv.dir().join("artifacts");

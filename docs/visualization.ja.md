@@ -31,7 +31,7 @@ uv run srap-tools visualize-sweep --sweep_dir results/20260525_120000_sweep   # 
 
 出力 (存在する CSV に応じて):
 
-- `sweep_sw_by_subset.png` — 資源サブセット別の平均 SW を入室条件で色分け (r_size > r_random の順序は seed を揃えた比較で最も明瞭; [再現](reproduction.ja.md) 参照)．
+- `sweep_sw_by_subset.png` — 資源サブセット別の平均 SW を入室条件で色分け．scripted mock のスイープでは論文のポリシー順序を評価できない．[再現](reproduction.ja.md) 参照．
 - `poa_convergence.png` — POA の最良/平均適応度の世代推移 (Fig.4 風; エリート保存で最良は単調非減少)．
 
 ## `show-experiment-settings`
